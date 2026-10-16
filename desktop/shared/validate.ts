@@ -1,12 +1,17 @@
-import type { DesktopSettings } from './types';
+import type { CameraSource, DesktopSettings } from './types';
 
 export const DEFAULT_SETTINGS: DesktopSettings = {
   backendUrl: 'http://127.0.0.1:8000',
   inferenceUrl: 'http://127.0.0.1:8100',
   cameraIp: 'http://10.241.226.236',
   cameraUrl: 'http://10.241.226.236:81/stream',
+  cameraSource: 'webcam',
+  cameraIndex: null,
+  cameraDevice: '',
   modelPath: 'F:\\wildcraft_project\\weights\\best.pt',
-  confidence: 0.25,
+  confidence: 0.35,
+  inferenceFps: 4,
+  eventWindowS: 20,
 };
 
 const ALERT_KINDS = new Set([
@@ -120,20 +125,80 @@ export function clampConfidence(value: number): number | null {
   return rounded;
 }
 
+function clampFps(value: number): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = Math.round(value * 10) / 10;
+  if (rounded < 0.5 || rounded > 12) {
+    return null;
+  }
+  return rounded;
+}
+
+function clampWindow(value: number): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = Math.round(value);
+  if (rounded < 5 || rounded > 120) {
+    return null;
+  }
+  return rounded;
+}
+
+function normalizeCameraIndex(value: unknown): number | null {
+  if (value == null || value === '') {
+    return null;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 32) {
+    return null;
+  }
+  return value;
+}
+
 export function normalizeSettings(input: DesktopSettings): DesktopSettings | null {
   const backendUrl = normalizeBackendUrl(input.backendUrl);
   const inferenceUrl = normalizeServiceUrl(input.inferenceUrl);
-  const cameraUrl = normalizeCameraUrl(input.cameraUrl);
+  const cameraSource: CameraSource = input.cameraSource === 'stream' ? 'stream' : 'webcam';
+  const cameraUrl = input.cameraUrl.trim() ? normalizeCameraUrl(input.cameraUrl) : '';
   const confidence = clampConfidence(input.confidence);
-  const cameraIp = normalizeCameraIp(input.cameraIp);
+  const cameraIp = input.cameraIp.trim() ? normalizeCameraIp(input.cameraIp) : '';
   const modelPath = input.modelPath.trim();
-  if (!backendUrl || !inferenceUrl || !cameraUrl || !cameraIp || confidence == null) {
+  const cameraDevice = typeof input.cameraDevice === 'string' ? input.cameraDevice.trim() : '';
+  const inferenceFps = clampFps(typeof input.inferenceFps === 'number' ? input.inferenceFps : DEFAULT_SETTINGS.inferenceFps);
+  const eventWindowS = clampWindow(typeof input.eventWindowS === 'number' ? input.eventWindowS : DEFAULT_SETTINGS.eventWindowS);
+  if (!backendUrl || !inferenceUrl || confidence == null || inferenceFps == null || eventWindowS == null) {
+    return null;
+  }
+  if (input.cameraUrl.trim() && !cameraUrl) {
+    return null;
+  }
+  if (input.cameraIp.trim() && !cameraIp) {
+    return null;
+  }
+  if (cameraSource === 'stream' && (!cameraUrl || !cameraIp)) {
     return null;
   }
   if (!modelPath || modelPath.length > 500 || !modelPath.toLowerCase().endsWith('.pt') || /[\r\n]/.test(modelPath)) {
     return null;
   }
-  return { backendUrl, inferenceUrl, cameraIp, cameraUrl, modelPath, confidence };
+  if (cameraDevice.length > 200 || /[\r\n]/.test(cameraDevice)) {
+    return null;
+  }
+  return {
+    backendUrl,
+    inferenceUrl,
+    cameraIp: cameraIp ?? '',
+    cameraUrl: cameraUrl ?? '',
+    cameraSource,
+    cameraIndex: normalizeCameraIndex(input.cameraIndex),
+    cameraDevice,
+    modelPath,
+    confidence,
+    inferenceFps,
+    eventWindowS,
+  };
 }
 
 export function websocketUrl(base: string, path: string): string {

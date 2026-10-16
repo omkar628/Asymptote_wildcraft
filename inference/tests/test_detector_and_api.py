@@ -48,6 +48,36 @@ class DetectorTests(unittest.TestCase):
         assert encoded is not None
         self.assertTrue(encoded.startswith(b"\xff\xd8"))
         self.assertEqual(int(frame.sum()), 0)
+        self.assertGreater(int(drawn.sum()), 0)
+
+
+class ClassThresholdTests(unittest.TestCase):
+    def test_smoke_and_fire_use_separate_gates(self) -> None:
+        from wildcraft_inference.detector import keeps_class
+
+        self.assertFalse(keeps_class("smoke", 0.50))
+        self.assertTrue(keeps_class("smoke", 0.51))
+        self.assertFalse(keeps_class("fire", 0.20))
+        self.assertTrue(keeps_class("fire", 0.21))
+        self.assertFalse(keeps_class("person", 0.99))
+
+    def test_box_area_maps_to_distance_and_a_dummy_offset(self) -> None:
+        from wildcraft_inference.detector import CAMERA_LAT, CAMERA_LON, annotate_detection, estimate_distance_m
+        from wildcraft_inference.events import Box
+
+        full = estimate_distance_m((0, 0, 64, 48), 64, 48)
+        tiny = estimate_distance_m((0, 0, 1, 1), 64, 48)
+        self.assertAlmostEqual(full, 1.0)
+        self.assertGreater(tiny, 49.0)
+        self.assertLess(tiny, 50.0)
+        near = annotate_detection(Box("fire", 0.31, (0, 0, 64, 48)), 64, 48)
+        far = annotate_detection(Box("smoke", 0.41, (0, 0, 1, 1)), 64, 48)
+        assert near.estimated_lat is not None and far.estimated_lat is not None
+        assert near.estimated_lon is not None and far.estimated_lon is not None
+        self.assertAlmostEqual(near.estimated_lat, CAMERA_LAT + 1.0 / 111_320.0)
+        self.assertAlmostEqual(near.estimated_lon, CAMERA_LON + 1.0 / 111_320.0)
+        self.assertGreater(far.estimated_lat, near.estimated_lat)
+        self.assertIn("Not a measured location", str(far.as_dict()["location_note"]))
 
 
 class ModelPathTests(unittest.TestCase):
@@ -135,6 +165,9 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(status["inference"]["confidence"], 0.25)
                 rejected = await client.post("/api/camera/connect", json={"url": "http://127.0.0.1/stream"})
                 self.assertEqual(rejected.status_code, 422)
+                rejected_webcam = await client.post("/api/camera/webcam", json={})
+                self.assertEqual(rejected_webcam.status_code, 422)
+                self.assertIn("does not need an ESP32-CAM", rejected_webcam.json()["detail"])
                 updated = await client.put(
                     "/api/settings",
                     json={"model_path": str(root / "other.pt"), "confidence": 0.4},

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { predictFireRisk } from './fireRisk';
-import { detectionStatusText, parseInferenceStatus } from './inferenceParse';
+import { cameraLinkText, detectionLinkText, detectionStatusText, modelLinkText, parseInferenceStatus } from './inferenceParse';
 import { parseReading, parseSocketMessage } from './sensorParse';
 import type { InferenceStatus } from '../../shared/types';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -73,7 +73,8 @@ test('urls keep the backend host and the camera stream path', () => {
   assert.equal(DEFAULT_SETTINGS.cameraIp, 'http://10.241.226.236');
   assert.equal(DEFAULT_SETTINGS.cameraUrl, 'http://10.241.226.236:81/stream');
   assert.equal(DEFAULT_SETTINGS.modelPath, 'F:\\wildcraft_project\\weights\\best.pt');
-  assert.equal(DEFAULT_SETTINGS.confidence, 0.25);
+  assert.equal(DEFAULT_SETTINGS.confidence, 0.35);
+  assert.equal(DEFAULT_SETTINGS.cameraSource, 'webcam');
 });
 
 test('camera URL settings save and load after a restart', () => {
@@ -84,8 +85,13 @@ test('camera URL settings save and load after a restart', () => {
     inferenceUrl: 'http://127.0.0.1:8100',
     cameraIp: 'http://10.241.226.236',
     cameraUrl: 'http://10.241.226.236:81/stream',
+    cameraSource: 'stream',
+    cameraIndex: null,
+    cameraDevice: '',
     modelPath: 'F:\\wildcraft_project\\weights\\best.pt',
     confidence: 0.25,
+    inferenceFps: 4,
+    eventWindowS: 20,
   });
   assert.equal(saved.cameraIp, 'http://10.241.226.236');
   const stored = JSON.parse(readFileSync(filePath, 'utf8')) as { modelPath: string; cameraUrl: string };
@@ -98,6 +104,29 @@ test('camera URL settings save and load after a restart', () => {
   assert.equal(loaded.cameraUrl, 'http://10.241.226.236:81/stream');
   assert.equal(loaded.modelPath, 'F:\\wildcraft_project\\weights\\best.pt');
   assert.equal(loaded.confidence, 0.25);
+  assert.equal(loaded.cameraSource, 'stream');
+  const webcamFile = path.join(directory, 'webcam.json');
+  writeFileSync(
+    webcamFile,
+    JSON.stringify({
+      backendUrl: 'http://127.0.0.1:8000',
+      inferenceUrl: 'http://127.0.0.1:8100',
+      cameraIp: '',
+      cameraUrl: '',
+      modelPath: 'F:\\wildcraft_project\\weights\\best.pt',
+      confidence: 0.35,
+    }),
+  );
+  const webcamSettings = loadSettings(webcamFile, 'F:\\wildcraft_project');
+  assert.equal(webcamSettings.cameraSource, 'webcam');
+  assert.equal(webcamSettings.cameraUrl, '');
+  assert.equal(webcamSettings.confidence, 0.35);
+  assert.equal(cameraLinkText('streaming'), 'Camera connected');
+  assert.equal(cameraLinkText('idle'), 'Camera disconnected');
+  assert.equal(modelLinkText(inferenceStatus({ state: 'loading', loaded: false })), 'Model loading');
+  assert.equal(modelLinkText(inferenceStatus({})), 'Model ready');
+  assert.equal(detectionLinkText(inferenceStatus({})), 'Detection running');
+  assert.equal(detectionLinkText(inferenceStatus({ frames: 0, lastError: 'Inference failed: cuda' })), 'Detection error');
   const migratedFile = path.join(directory, 'old.json');
   writeFileSync(
     migratedFile,

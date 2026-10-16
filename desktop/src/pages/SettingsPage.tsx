@@ -85,6 +85,7 @@ export function SettingsPage() {
           Camera stream URL
           <input value={draft.cameraUrl} onChange={(event) => update({ cameraUrl: event.target.value })} spellCheck={false} />
         </label>
+        <p className="muted">This address is optional. Local webcam detection is chosen on Camera and AI Detection and does not need an ESP32-CAM IP.</p>
         {warning ? <p className="banner warn">{warning}</p> : null}
         <label>
           YOLO weights path

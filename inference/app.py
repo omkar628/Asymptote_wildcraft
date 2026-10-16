@@ -1,7 +1,8 @@
 """Start the Wildcraft inference service.
 
-This process reads the ESP32-CAM and runs the local YOLO weights.
-It does not open COM6. The sensor backend owns that serial port.
+This process reads the selected local webcam, or an optional MJPEG URL, and
+runs the local YOLO weights. It does not open COM6. The sensor backend owns
+that serial port. A local webcam does not need an ESP32-CAM address.
 """
 
 from __future__ import annotations
@@ -28,7 +29,8 @@ def main() -> None:
     if port_is_open(settings.host, settings.port):
         raise SystemExit(
             f"[wildcraft] Port {settings.port} is already in use. "
-            "An inference service is probably already running, so this process will not start another one."
+            "An inference service is probably already running, so this process will not start another one. "
+            "Run start-inference.ps1 -Restart to stop that one process and start its replacement."
         )
     print(f"[wildcraft] Inference http://{settings.host}:{settings.port}", flush=True)
     print(f"[wildcraft] Model path: {settings.model_path}", flush=True)

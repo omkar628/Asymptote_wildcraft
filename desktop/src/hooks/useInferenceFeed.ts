@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import type { DesktopSettings, InferenceStatus } from '../../shared/types';
+import type { DesktopSettings, InferenceStatus, LocalCamera } from '../../shared/types';
 import { websocketUrl } from '../../shared/validate';
 import { HttpError, requestJson } from '../services/http';
 import { parseDetection, parseInferenceStatus } from '../services/inferenceParse';
+
+export type CameraList = {
+  cameras: LocalCamera[];
+  preferredId: string | null;
+  scan: string;
+};
 
 export type InferenceFeed = {
   status: InferenceStatus | null;
@@ -11,8 +17,11 @@ export type InferenceFeed = {
   errorText: string | null;
   session: number;
   connectCamera: (url: string) => Promise<void>;
+  connectWebcam: (camera: { index: number | null; name: string; id: string }) => Promise<InferenceStatus>;
   disconnectCamera: () => Promise<void>;
-  pushSettings: (settings: Pick<DesktopSettings, 'modelPath' | 'confidence'>) => Promise<void>;
+  setDetection: (enabled: boolean) => Promise<void>;
+  listCameras: () => Promise<CameraList>;
+  pushSettings: (settings: Pick<DesktopSettings, 'modelPath' | 'confidence' | 'inferenceFps' | 'eventWindowS'>) => Promise<void>;
 };
 
 export function useInferenceFeed(baseUrl: string): InferenceFeed {
@@ -153,6 +162,70 @@ export function useInferenceFeed(baseUrl: string): InferenceFeed {
     [baseUrl],
   );
 
+  const connectWebcam = useCallback(
+    async (camera: { index: number | null; name: string; id: string }) => {
+      const body = await requestJson(`${baseUrl}/api/camera/webcam`, 15000, {
+        method: 'POST',
+        body: JSON.stringify({ index: camera.index, name: camera.name, id: camera.id }),
+      });
+      const parsed = parseInferenceStatus(body);
+      if (!parsed) {
+        throw new Error('The inference service did not confirm the webcam.');
+      }
+      setStatus(parsed);
+      setSession((value) => value + 1);
+      return parsed;
+    },
+    [baseUrl],
+  );
+
+  const setDetection = useCallback(
+    async (enabled: boolean) => {
+      const body = await requestJson(`${baseUrl}/api/camera/detection`, 8000, {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      });
+      const parsed = parseInferenceStatus(body);
+      if (!parsed) {
+        throw new Error('The inference service did not confirm the detection change.');
+      }
+      setStatus(parsed);
+    },
+    [baseUrl],
+  );
+
+  const listCameras = useCallback(async () => {
+    const body = await requestJson(`${baseUrl}/api/cameras`, 20000);
+    if (!body || typeof body !== 'object' || !('cameras' in body) || !Array.isArray((body as { cameras?: unknown }).cameras)) {
+      throw new Error('The inference service did not return a camera list.');
+    }
+    const record = body as { cameras: unknown[]; preferred_id?: unknown; scan?: unknown };
+    const cameras: LocalCamera[] = [];
+    for (const item of record.cameras) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      const camera = item as Record<string, unknown>;
+      if (typeof camera.id !== 'string' || typeof camera.name !== 'string') {
+        continue;
+      }
+      cameras.push({
+        id: camera.id,
+        index: typeof camera.index === 'number' ? camera.index : null,
+        name: camera.name,
+        backend: typeof camera.backend === 'string' ? camera.backend : '',
+        width: typeof camera.width === 'number' ? camera.width : 0,
+        height: typeof camera.height === 'number' ? camera.height : 0,
+        preferred: camera.preferred === true,
+      });
+    }
+    return {
+      cameras,
+      preferredId: typeof record.preferred_id === 'string' ? record.preferred_id : null,
+      scan: typeof record.scan === 'string' ? record.scan : '',
+    };
+  }, [baseUrl]);
+
   const disconnectCamera = useCallback(async () => {
     const body = await requestJson(`${baseUrl}/api/camera/disconnect`, 8000, { method: 'POST' });
     const parsed = parseInferenceStatus(body);
@@ -163,10 +236,15 @@ export function useInferenceFeed(baseUrl: string): InferenceFeed {
   }, [baseUrl]);
 
   const pushSettings = useCallback(
-    async (settings: Pick<DesktopSettings, 'modelPath' | 'confidence'>) => {
+    async (settings: Pick<DesktopSettings, 'modelPath' | 'confidence' | 'inferenceFps' | 'eventWindowS'>) => {
       const body = await requestJson(`${baseUrl}/api/settings`, 8000, {
         method: 'PUT',
-        body: JSON.stringify({ model_path: settings.modelPath, confidence: settings.confidence }),
+        body: JSON.stringify({
+          model_path: settings.modelPath,
+          confidence: settings.confidence,
+          max_fps: settings.inferenceFps,
+          event_window_s: settings.eventWindowS,
+        }),
       });
       const parsed = parseInferenceStatus(body);
       if (parsed) {
@@ -176,5 +254,5 @@ export function useInferenceFeed(baseUrl: string): InferenceFeed {
     [baseUrl],
   );
 
-  return { status, phase, errorText, session, connectCamera, disconnectCamera, pushSettings };
+  return { status, phase, errorText, session, connectCamera, connectWebcam, disconnectCamera, setDetection, listCameras, pushSettings };
 }

@@ -25,7 +25,7 @@ export function loadSettings(filePath: string, projectRoot: string): DesktopSett
 export function saveSettings(filePath: string, settings: DesktopSettings): DesktopSettings {
   const normalized = normalizeSettings(settings);
   if (!normalized) {
-    throw new Error('Check the backend URL, inference URL, camera URL, model path, and confidence.');
+    throw new Error('Check the backend URL, inference URL, camera settings, model path, and confidence.');
   }
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(normalized, null, 2), 'utf8');

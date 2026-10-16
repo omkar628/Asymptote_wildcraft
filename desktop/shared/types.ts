@@ -51,13 +51,30 @@ export type SensorStatus = {
   preliminaryAlerts: PreliminaryAlert[];
 };
 
+export type CameraSource = 'webcam' | 'stream';
+
 export type DesktopSettings = {
   backendUrl: string;
   inferenceUrl: string;
   cameraIp: string;
   cameraUrl: string;
+  cameraSource: CameraSource;
+  cameraIndex: number | null;
+  cameraDevice: string;
   modelPath: string;
   confidence: number;
+  inferenceFps: number;
+  eventWindowS: number;
+};
+
+export type LocalCamera = {
+  id: string;
+  index: number | null;
+  name: string;
+  backend: string;
+  width: number;
+  height: number;
+  preferred: boolean;
 };
 
 export type AlertKind =
@@ -100,6 +117,9 @@ export type InferenceBox = {
   class_name: string;
   confidence: number;
   bbox: number[];
+  distance_m?: number;
+  estimated_lat?: number;
+  estimated_lon?: number;
 };
 
 export type InferenceStatus = {
@@ -119,9 +139,16 @@ export type InferenceStatus = {
     last_error: string | null;
     last_frame_at: string | null;
     frames_received: number;
+    source?: string;
+    index?: number | null;
+    device_name?: string | null;
+    width?: number | null;
+    height?: number | null;
+    capture_fps?: number | null;
   };
   inference: {
     running: boolean;
+    detection_state?: string;
     confidence: number;
     processed_fps: number;
     last_inference_at: string | null;
@@ -130,6 +157,8 @@ export type InferenceStatus = {
     frame_width: number | null;
     frame_height: number | null;
     last_duration_ms: number | null;
+    max_fps?: number;
+    event_window_s?: number;
   };
   recent_boxes: InferenceBox[];
   recent_events: DetectionRecord[];

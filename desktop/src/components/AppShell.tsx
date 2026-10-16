@@ -1,8 +1,10 @@
-import { Bell, History, LayoutDashboard, Radio, Settings, Trees, Video } from 'lucide-react';
+import { Bell, History, LayoutDashboard, Map, Plane, Radio, Settings, Trees, Video } from 'lucide-react';
 import { useState } from 'react';
 
 import { StatusPill } from './StatusPill';
 import { AlertsPage } from '../pages/AlertsPage';
+import { DroneSimulatorPage } from '../pages/DroneSimulatorPage';
+import { ForestIntelPage } from '../pages/ForestIntelPage';
 import { CameraPage } from '../pages/CameraPage';
 import { HistoryPage } from '../pages/HistoryPage';
 import { OverviewPage } from '../pages/OverviewPage';
@@ -16,6 +18,8 @@ const pages = [
   { id: 'camera', label: 'Camera', icon: Video },
   { id: 'alerts', label: 'Alerts', icon: Bell },
   { id: 'history', label: 'History', icon: History },
+  { id: 'simulator', label: 'Drone Simulator', icon: Plane },
+  { id: 'intel', label: 'Forest Intelligence', icon: Map },
   { id: 'settings', label: 'Settings', icon: Settings },
 ] as const;
 
@@ -57,9 +61,9 @@ export function AppShell() {
             );
           })}
         </nav>
-        <p className="sidebar-note">Offline desktop. Sensor readings come from the local backend. Camera frames come from the ESP32-CAM on this Wi-Fi.</p>
+        <p className="sidebar-note">Offline desktop. Sensor readings come from the local backend. Camera frames come from the selected USB webcam, or from an optional stream address.</p>
       </aside>
-      <div className="workspace">
+      <div className={page === 'simulator' ? 'workspace sim-workspace' : page === 'intel' ? 'workspace intel-workspace' : 'workspace'}>
         <header className="topbar">
           <StatusPill label={sensor.reachedApi ? `Backend ${sensor.link}` : 'Backend unreachable'} tone={backendTone} />
           <StatusPill label={inference.phase === 'connected' ? `Inference ${inference.status?.camera.state ?? 'idle'}` : 'Inference stopped'} tone={cameraTone} />
@@ -71,6 +75,8 @@ export function AppShell() {
           {page === 'camera' ? <CameraPage /> : null}
           {page === 'alerts' ? <AlertsPage /> : null}
           {page === 'history' ? <HistoryPage /> : null}
+          {page === 'simulator' ? <DroneSimulatorPage /> : null}
+          {page === 'intel' ? <ForestIntelPage /> : null}
           {page === 'settings' ? <SettingsPage /> : null}
         </main>
       </div>

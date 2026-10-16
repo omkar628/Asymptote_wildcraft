@@ -154,7 +154,7 @@ export function ForestProvider({ children }: { children: ReactNode }) {
         kind: 'camera_disconnected',
         severity: 'warning',
         title: 'Camera disconnected',
-        detail: `${inference.status?.camera.last_error ?? 'The ESP32-CAM stream stopped.'} This is a camera connection notice, not a fire alert.`,
+        detail: `${inference.status?.camera.last_error ?? 'The camera stopped sending frames.'} This is a camera connection notice, not a fire alert.`,
         sourceLabel: 'Camera link',
         dedupeKey: `camera:${createdAt}`,
         acknowledged: false,
@@ -178,7 +178,7 @@ export function ForestProvider({ children }: { children: ReactNode }) {
     if (inference.phase !== 'connected' || !settings) {
       return;
     }
-    const key = `${settings.modelPath}|${settings.confidence}`;
+    const key = `${settings.modelPath}|${settings.confidence}|${settings.inferenceFps}|${settings.eventWindowS}`;
     if (pushed.current === key) {
       return;
     }

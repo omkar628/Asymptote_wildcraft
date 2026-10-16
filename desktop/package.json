@@ -11,18 +11,28 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "node scripts/test-unit.mjs",
     "smoke": "npm run build:renderer && npm run build:electron && node scripts/smoke.mjs",
+    "sim-check": "node scripts/sim-check.mjs",
+    "map-check": "npm run build:renderer && npm run build:electron && node scripts/map-check.mjs",
+    "camera-check": "npm run build:renderer && npm run build:electron && node scripts/camera-check.mjs",
     "dist": "npm run typecheck && npm run build:renderer && npm run build:electron && electron-builder --win"
   },
   "dependencies": {
+    "@react-three/drei": "^10.4.4",
+    "@react-three/fiber": "^9.2.0",
+    "@types/leaflet": "1.9.21",
+    "leaflet": "1.9.4",
     "lucide-react": "0.544.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "sql.js": "^1.12.0"
+    "react-leaflet": "5.0.0",
+    "sql.js": "^1.12.0",
+    "three": "^0.172.0"
   },
   "devDependencies": {
     "@types/node": "^24.9.1",
     "@types/react": "~19.2.2",
     "@types/react-dom": "~19.2.2",
+    "@types/three": "^0.172.0",
     "@vitejs/plugin-react": "^5.0.4",
     "concurrently": "^9.2.1",
     "electron": "^35.7.5",
@@ -48,7 +58,9 @@
       "dist-electron/sql-wasm.wasm"
     ],
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "signAndEditExecutable": false
     },
     "nsis": {

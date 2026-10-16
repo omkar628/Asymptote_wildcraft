@@ -20,7 +20,14 @@ function parseBox(value: unknown): InferenceBox | null {
   if (!Array.isArray(value.bbox) || value.bbox.length !== 4 || value.bbox.some((item) => !isFiniteNumber(item))) {
     return null;
   }
-  return { class_name: value.class_name, confidence: value.confidence, bbox: value.bbox };
+  return {
+    class_name: value.class_name,
+    confidence: value.confidence,
+    bbox: value.bbox,
+    distance_m: isFiniteNumber(value.distance_m) ? value.distance_m : undefined,
+    estimated_lat: isFiniteNumber(value.estimated_lat) ? value.estimated_lat : undefined,
+    estimated_lon: isFiniteNumber(value.estimated_lon) ? value.estimated_lon : undefined,
+  };
 }
 
 export function parseDetection(value: unknown): DetectionRecord | null {
@@ -134,9 +141,16 @@ export function parseInferenceStatus(value: unknown): InferenceStatus | null {
       last_error: camera.last_error,
       last_frame_at: camera.last_frame_at,
       frames_received: camera.frames_received,
+      source: typeof camera.source === 'string' ? camera.source : '',
+      index: isFiniteNumber(camera.index) ? camera.index : null,
+      device_name: typeof camera.device_name === 'string' ? camera.device_name : null,
+      width: isFiniteNumber(camera.width) ? camera.width : null,
+      height: isFiniteNumber(camera.height) ? camera.height : null,
+      capture_fps: isFiniteNumber(camera.capture_fps) ? camera.capture_fps : null,
     },
     inference: {
       running: inference.running,
+      detection_state: typeof inference.detection_state === 'string' ? inference.detection_state : inference.running ? 'running' : 'stopped',
       confidence: inference.confidence,
       processed_fps: inference.processed_fps,
       last_inference_at: inference.last_inference_at,
@@ -145,10 +159,48 @@ export function parseInferenceStatus(value: unknown): InferenceStatus | null {
       frame_width: isFiniteNumber(inference.frame_width) ? inference.frame_width : null,
       frame_height: isFiniteNumber(inference.frame_height) ? inference.frame_height : null,
       last_duration_ms: isFiniteNumber(inference.last_duration_ms) ? inference.last_duration_ms : null,
+      max_fps: isFiniteNumber(inference.max_fps) ? inference.max_fps : undefined,
+      event_window_s: isFiniteNumber(inference.event_window_s) ? inference.event_window_s : undefined,
     },
     recent_boxes: recentBoxes,
     recent_events: recentEvents,
   };
+}
+
+export function cameraLinkText(state: string | undefined): string {
+  if (state === 'streaming') {
+    return 'Camera connected';
+  }
+  if (state === 'connecting') {
+    return 'Camera connecting';
+  }
+  if (state === 'reconnecting') {
+    return 'Camera reconnecting';
+  }
+  return 'Camera disconnected';
+}
+
+export function modelLinkText(status: InferenceStatus | null): string {
+  if (!status || status.model.state === 'loading') {
+    return 'Model loading';
+  }
+  if (status.model.loaded || status.model.state === 'ready') {
+    return 'Model ready';
+  }
+  return 'Model error';
+}
+
+export function detectionLinkText(status: InferenceStatus | null): string {
+  if (!status) {
+    return 'Detection stopped';
+  }
+  if (status.inference.detection_state === 'error' || (status.model.loaded && status.inference.last_error)) {
+    return 'Detection error';
+  }
+  if (status.inference.running || status.inference.detection_state === 'running') {
+    return 'Detection running';
+  }
+  return 'Detection stopped';
 }
 
 export function detectionStatusText(status: InferenceStatus | null): DetectionStatus {

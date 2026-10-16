@@ -22,6 +22,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from alerts import AlertEngine, Thresholds
 from config import Settings
+from firms import FirmsError, firms_status_payload, load_hotspots
 from serial_collector import (
     CsvLog,
     ReadingStore,
@@ -383,6 +384,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
+
+    @app.get("/api/firms/status")
+    def firms_status() -> dict:
+        return firms_status_payload()
+
+    @app.get("/api/firms/hotspots")
+    def firms_hotspots(
+        west: float,
+        south: float,
+        east: float,
+        north: float,
+        days: int = 1,
+        product: str = "VIIRS_SNPP_NRT",
+        date: str | None = None,
+        refresh: bool = False,
+    ) -> dict:
+        try:
+            return load_hotspots(west, south, east, north, days, product, date, refresh)
+        except FirmsError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
 
     @app.get("/health", response_model=HealthOut)
     def health() -> HealthOut:

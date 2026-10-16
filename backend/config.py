@@ -16,7 +16,10 @@ ENV_FILE = BACKEND_DIR / ".env"
 
 
 def load_local_env(path: Path = ENV_FILE) -> None:
-    """Load SENSOR_* keys from a local file without overriding the shell."""
+    """Load local keys from backend/.env without overriding the shell.
+
+    NASA_FIRMS_MAP_KEY is read for server-side requests only. Do not log it.
+    """
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -25,7 +28,9 @@ def load_local_env(path: Path = ENV_FILE) -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        if not key.startswith("SENSOR_") or key in os.environ:
+        if key in os.environ:
+            continue
+        if not key.startswith("SENSOR_") and key != "NASA_FIRMS_MAP_KEY":
             continue
         os.environ[key] = value.strip().strip('"').strip("'")
 

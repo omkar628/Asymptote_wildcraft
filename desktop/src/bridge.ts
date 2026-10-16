@@ -31,7 +31,7 @@ function browserBridge(): WildcraftBridge {
     async saveSettings(settings) {
       const normalized = normalizeSettings(settings);
       if (!normalized) {
-        throw new Error('Check the backend URL, inference URL, camera URL, model path, and confidence.');
+        throw new Error('Check the backend URL, inference URL, camera settings, model path, and confidence.');
       }
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
       return normalized;

@@ -13,6 +13,22 @@ from pathlib import Path
 from wildcraft_inference.events import DetectionEvent
 
 
+class MemoryDetectionLog:
+    """Detection results stay in the live frame. Nothing is written to disk."""
+
+    def insert(self, event: DetectionEvent) -> None:
+        return None
+
+    def list_recent(self, limit: int) -> list[dict[str, object]]:
+        return []
+
+    def acknowledge(self, detection_id: str) -> dict[str, object] | None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 class DetectionStore:
     def __init__(self, path: Path) -> None:
         self.path = path

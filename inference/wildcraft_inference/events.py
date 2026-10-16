@@ -17,13 +17,23 @@ class Box:
     class_name: str
     confidence: float
     bbox: tuple[int, int, int, int]
+    distance_m: float | None = None
+    estimated_lat: float | None = None
+    estimated_lon: float | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "class_name": self.class_name,
             "confidence": round(float(self.confidence), 4),
             "bbox": [int(self.bbox[0]), int(self.bbox[1]), int(self.bbox[2]), int(self.bbox[3])],
         }
+        if self.distance_m is not None:
+            payload["distance_m"] = round(float(self.distance_m), 1)
+        if self.estimated_lat is not None and self.estimated_lon is not None:
+            payload["estimated_lat"] = round(float(self.estimated_lat), 5)
+            payload["estimated_lon"] = round(float(self.estimated_lon), 5)
+            payload["location_note"] = "Estimate from box size and a dummy camera point. Not a measured location."
+        return payload
 
 
 @dataclass(frozen=True)

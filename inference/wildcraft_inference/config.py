@@ -82,7 +82,7 @@ class Settings:
                 "[wildcraft] Refusing to bind the inference service on every interface. "
                 "Use 127.0.0.1 so only this PC can reach it."
             )
-        confidence = _optional_float("WILDCRAFT_CONFIDENCE", 0.25)
+        confidence = _optional_float("WILDCRAFT_CONFIDENCE", 0.35)
         if not 0.01 <= confidence <= 0.99:
             raise SystemExit("[wildcraft] WILDCRAFT_CONFIDENCE must be from 0.01 to 0.99.")
         max_fps = _optional_float("WILDCRAFT_MAX_FPS", 4.0)

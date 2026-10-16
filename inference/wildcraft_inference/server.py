@@ -23,6 +23,18 @@ class SettingsBody(BaseModel):
 
     model_path: str | None = None
     confidence: float | None = None
+    max_fps: float | None = None
+    event_window_s: float | None = None
+
+
+class WebcamBody(BaseModel):
+    index: int | None = None
+    name: str | None = None
+    id: str | None = None
+
+
+class DetectionBody(BaseModel):
+    enabled: bool
 
 
 def create_app(settings: Settings | None = None, runtime: InferenceRuntime | None = None) -> FastAPI:
@@ -66,15 +78,29 @@ def create_app(settings: Settings | None = None, runtime: InferenceRuntime | Non
         return {
             "model_path": model["path"],
             "confidence": inference["confidence"],
+            "max_fps": inference.get("max_fps"),
+            "event_window_s": inference.get("event_window_s"),
             "camera_url": camera["url"],
+            "camera_source": camera.get("source") or "",
+            "camera_index": camera.get("index"),
+            "camera_name": camera.get("device_name") or "",
         }
 
     @app.put("/api/settings")
     def put_settings(body: SettingsBody) -> dict[str, object]:
         try:
-            return app.state.runtime.update_settings(body.model_path, body.confidence)
+            return app.state.runtime.update_settings(
+                body.model_path,
+                body.confidence,
+                body.max_fps,
+                body.event_window_s,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/cameras")
+    def cameras() -> dict[str, object]:
+        return app.state.runtime.list_cameras()
 
     @app.post("/api/camera/connect")
     def connect_camera(body: CameraBody) -> dict[str, object]:
@@ -82,6 +108,17 @@ def create_app(settings: Settings | None = None, runtime: InferenceRuntime | Non
             return app.state.runtime.connect_camera(body.url)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/camera/webcam")
+    def connect_webcam(body: WebcamBody) -> dict[str, object]:
+        try:
+            return app.state.runtime.connect_webcam(index=body.index, name=body.name, device_id=body.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/camera/detection")
+    def set_detection(body: DetectionBody) -> dict[str, object]:
+        return app.state.runtime.set_detection(body.enabled)
 
     @app.post("/api/camera/disconnect")
     def disconnect_camera() -> dict[str, object]:
@@ -100,6 +137,15 @@ def create_app(settings: Settings | None = None, runtime: InferenceRuntime | Non
         if row is None:
             raise HTTPException(status_code=404, detail="Detection not found")
         return row
+
+    @app.get("/frame.jpg")
+    def frame_jpeg():
+        from fastapi.responses import Response
+
+        jpeg = app.state.runtime.latest_annotated_jpeg()
+        if not jpeg:
+            raise HTTPException(status_code=404, detail="No camera frame is available yet.")
+        return Response(content=jpeg, media_type="image/jpeg")
 
     @app.get("/stream")
     async def stream() -> StreamingResponse:
