@@ -27,7 +27,7 @@ export function BackendSettingsCard({
     <View style={styles.card}>
       <Text style={styles.title}>Laptop address</Text>
       <Text style={styles.body}>
-        On the laptop, run ipconfig and use the IPv4 address of the Wi-Fi adapter. The phone and laptop need the same network. localhost on the phone is the phone, not the laptop.
+        On the laptop, run ipconfig and use the IPv4 address of the Wi-Fi adapter. The phone and laptop need the same network. localhost on the phone is the phone, not the laptop. Expo Go on a phone uses that Wi-Fi address. The Android emulator uses http://10.0.2.2:8000. A web page opened on this laptop uses http://127.0.0.1:8000.
       </Text>
       <TextInput
         accessibilityLabel="Laptop API address"
@@ -43,7 +43,7 @@ export function BackendSettingsCard({
         value={draft}
       />
       {errorText ? <Text style={styles.error}>{errorText}</Text> : null}
-      <Text style={styles.meta}>Saved HTTP: {savedBase || 'Not set'}</Text>
+      <Text style={styles.meta}>Using: {savedBase || 'Not set'}</Text>
       <Text style={styles.meta}>WebSocket: {socketUrl || 'Set the HTTP address first'}</Text>
       <Text style={styles.meta}>
         Android emulator only: http://10.0.2.2:8000 reaches the computer running the emulator. A physical phone cannot use that address.

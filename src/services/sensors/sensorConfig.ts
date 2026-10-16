@@ -1,5 +1,22 @@
 import type { DashboardLinkState, SocketPhase } from '@/types/liveSensor';
 
+export {
+  EMULATOR_API_BASE,
+  LAN_API_BASE,
+  LOOPBACK_API_BASE,
+  detectApiRuntime,
+  httpStatusApiMessage,
+  isEmulatorApiBase,
+  isLoopbackApiBase,
+  isStaleLanApiBase,
+  normalizeApiBase,
+  resolveApiBase,
+  timedOutApiMessage,
+  unreachableApiMessage,
+  websocketUrlFromBase,
+} from '@/services/sensors/apiBase';
+export type { ApiRuntime } from '@/services/sensors/apiBase';
+
 export const HISTORY_LIMIT = 120;
 export const HISTORY_MEMORY_CAP = 180;
 export const STATUS_POLL_MS = 5000;
@@ -8,47 +25,13 @@ export const STALE_AFTER_MS = 60_000;
 export const API_TIMEOUT_MS = 8000;
 export const STORAGE_KEY_BASE = 'tadoba.sensorApiBase';
 export const STORAGE_KEY_THRESHOLDS = 'tadoba.sensorPhoneThresholds';
-/** Physical-phone default. A saved address in the app replaces this. */
-export const DEFAULT_API_BASE = 'http://10.236.143.146:8000';
+/** Physical-phone default when EXPO_PUBLIC_SENSOR_API_BASE is absent. */
+export const DEFAULT_API_BASE = 'http://10.241.226.2:8000';
 
 export function bundledApiBase(): string {
   const value = process.env.EXPO_PUBLIC_SENSOR_API_BASE;
   const trimmed = typeof value === 'string' ? value.trim() : '';
   return trimmed || DEFAULT_API_BASE;
-}
-
-/** localhost on a phone is the phone, so it cannot be the laptop collector. */
-export function isLoopbackApiBase(base: string): boolean {
-  const host = base.replace(/^https?:\/\//i, '').split('/')[0]?.split(':')[0]?.toLowerCase() ?? '';
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
-}
-
-/** Accept an HTTP(S) base URL, or a WebSocket URL pasted from the setup notes. */
-export function normalizeApiBase(input: string): string | null {
-  let trimmed = input.trim();
-  if (!trimmed) {
-    return null;
-  }
-  if (/^wss:\/\//i.test(trimmed)) {
-    trimmed = `https://${trimmed.slice(6)}`;
-  } else if (/^ws:\/\//i.test(trimmed)) {
-    trimmed = `http://${trimmed.slice(5)}`;
-  }
-  trimmed = trimmed.replace(/\/ws\/sensors$/i, '').replace(/\/+$/, '');
-  if (!/^https?:\/\/[^/\s]+$/i.test(trimmed)) {
-    return null;
-  }
-  return trimmed;
-}
-
-export function websocketUrlFromBase(base: string): string {
-  if (/^https:\/\//i.test(base)) {
-    return `wss://${base.slice('https://'.length)}/ws/sensors`;
-  }
-  if (/^http:\/\//i.test(base)) {
-    return `ws://${base.slice('http://'.length)}/ws/sensors`;
-  }
-  return '';
 }
 
 export function dashboardLinkState(input: {

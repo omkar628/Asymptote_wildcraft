@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState } from 'react-native';
+import { AppState, Platform } from 'react-native';
+import Constants from 'expo-constants';
 
 import {
   emptyPhoneThresholds,
@@ -9,16 +10,17 @@ import {
 } from '@/services/sensors/preliminaryAlerts';
 import { fetchHistory, fetchLatest, fetchStatus, parseSocketMessage } from '@/services/sensors/sensorApi';
 import {
-  bundledApiBase,
   dashboardLinkState,
+  detectApiRuntime,
   HISTORY_LIMIT,
-  isLoopbackApiBase,
   normalizeApiBase,
+  resolveApiBase,
   STALE_AFTER_MS,
   STATUS_POLL_MS,
   STORAGE_KEY_BASE,
   STORAGE_KEY_THRESHOLDS,
   websocketUrlFromBase,
+  type ApiRuntime,
 } from '@/services/sensors/sensorConfig';
 import {
   acceptPolledLatest,
@@ -40,6 +42,18 @@ import type {
   SerialStatus,
   SocketPhase,
 } from '@/types/liveSensor';
+
+function currentApiRuntime(): { runtime: ApiRuntime; webHost: string | null } {
+  const webHost = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.hostname : null;
+  return {
+    runtime: detectApiRuntime({
+      os: Platform.OS,
+      isDevice: typeof Constants.isDevice === 'boolean' ? Constants.isDevice : null,
+      webHostname: webHost,
+    }),
+    webHost,
+  };
+}
 
 async function loadSnapshot(base: string, live: readonly SensorReading[]) {
   const [latestResult, historyResult, statusResult] = await Promise.all([
@@ -117,9 +131,18 @@ export function useLiveSensors() {
       if (cancelled) {
         return;
       }
-      const stored = normalizeApiBase(storedBase ?? '');
-      const bundled = normalizeApiBase(bundledApiBase());
-      const resolved = (stored && !isLoopbackApiBase(stored) ? stored : null) ?? bundled ?? '';
+      const runtime = currentApiRuntime();
+      const resolved = resolveApiBase({
+        stored: storedBase,
+        envValue: process.env.EXPO_PUBLIC_SENSOR_API_BASE,
+        runtime: runtime.runtime,
+        webHost: runtime.webHost,
+      });
+      const storedNormalized = normalizeApiBase(storedBase ?? '');
+      if (storedNormalized && storedNormalized !== resolved) {
+        console.info(`[wildcraft] Saved API ${storedNormalized} was not used. Using ${resolved}.`);
+      }
+      console.info(`[wildcraft] API ${resolved} WebSocket ${websocketUrlFromBase(resolved) || 'unavailable'}`);
       setPhoneThresholds(parseStoredThresholds(storedThresholds));
       setDraftUrl(resolved);
       setBaseUrl(resolved);

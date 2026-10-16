@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import threading
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ from serial_collector import (
     ReadingStore,
     SensorReading,
     SerialCollector,
+    format_reading,
     load_recent,
     local_timestamp,
     log_line,
@@ -296,10 +298,7 @@ class Hub:
         observed = self.alerts.observe(reading)
         if not saved:
             log_line("[sensor] Reading is in memory only and was not written to the CSV log.")
-        log_line(
-            f"[sensor] {reading.timestamp} Temp={reading.temp_text} Hum={reading.humidity_text} "
-            f"MQ135={reading.mq135_text} MQ9={reading.mq9_text} RSSI={reading.rssi_text or 'n/a'}"
-        )
+        log_line(format_reading(reading))
         try:
             message = self.reading_message(reading, bool(observed["changed"]))
         except Exception as exc:
@@ -356,15 +355,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.hub.loop = asyncio.get_running_loop()
         current: Settings = app.state.settings
-        log_line(f"[sensor] CSV log: {current.csv_path}")
-        log_line(f"[sensor] Loaded {app.state.hub.store.count()} stored readings")
-        if current.host in {"0.0.0.0", "::"}:
-            log_line(
-                "[sensor] Listening on local interfaces. On a phone, use this PC's LAN IPv4 address, not localhost."
-            )
-            log_line("[sensor] Do not forward this port on a router.")
         if current.serial_enabled:
-            log_line(f"[sensor] Serial collector will use {current.serial_port} at {current.baud_rate} baud")
             app.state.hub.collector = SerialCollector(
                 current.serial_port,
                 current.baud_rate,
@@ -373,12 +364,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             app.state.hub.collector.start()
         else:
-            log_line("[sensor] Serial collection is disabled")
             app.state.hub.set_serial_status("disabled", False, None)
-        if app.state.hub.alerts.thresholds.any_configured():
-            log_line(f"[sensor] Threshold rules: {app.state.hub.alerts.thresholds.as_dict()}")
-        else:
-            log_line("[sensor] No threshold rules configured. Readings are logged without preliminary alerts.")
         try:
             yield
         finally:
@@ -490,9 +476,15 @@ app = create_app()
 
 def main() -> None:
     settings: Settings = app.state.settings
-    log_line(f"[sensor] API http://{settings.host}:{settings.port}")
-    log_line(f"[sensor] WebSocket path /ws/sensors on port {settings.port}")
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+        log_level="warning",
+        access_log=False,
+    )
 
 
 if __name__ == "__main__":

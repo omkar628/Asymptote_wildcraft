@@ -3,6 +3,7 @@
  * The phone never opens a serial port.
  */
 
+import { httpStatusApiMessage, timedOutApiMessage, unreachableApiMessage } from '@/services/sensors/apiBase';
 import { API_TIMEOUT_MS, HISTORY_LIMIT } from '@/services/sensors/sensorConfig';
 import type {
   AlertSource,
@@ -301,7 +302,8 @@ export function parseSocketMessage(raw: string): SensorSocketMessage | null {
   return null;
 }
 
-async function requestJson(url: string): Promise<unknown> {
+async function requestJson(base: string, path: string): Promise<unknown> {
+  const url = endpoint(base, path);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
   try {
@@ -315,21 +317,22 @@ async function requestJson(url: string): Promise<unknown> {
       signal: controller.signal,
     });
     if (!response.ok) {
-      throw new SensorApiError(`The laptop API returned HTTP ${response.status}.`);
+      throw new SensorApiError(httpStatusApiMessage(base, response.status));
     }
     try {
       return await response.json();
     } catch {
-      throw new SensorApiError('The address did not return sensor data.');
+      throw new SensorApiError(`The address ${base} did not return sensor data.`);
     }
   } catch (error) {
     if (error instanceof SensorApiError) {
       throw error;
     }
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new SensorApiError('The laptop API did not respond in time.');
+      throw new SensorApiError(timedOutApiMessage(base));
     }
-    throw new SensorApiError('Cannot reach the laptop API.');
+    console.warn(`[wildcraft] ${unreachableApiMessage(base)}`);
+    throw new SensorApiError(unreachableApiMessage(base));
   } finally {
     clearTimeout(timer);
   }
@@ -341,7 +344,7 @@ function endpoint(base: string, path: string): string {
 }
 
 export async function fetchLatest(base: string): Promise<LatestPayload> {
-  const payload = parseLatest(await requestJson(endpoint(base, '/api/sensors/latest')));
+  const payload = parseLatest(await requestJson(base, '/api/sensors/latest'));
   if (!payload) {
     throw new SensorApiError('The latest-reading response was not valid.');
   }
@@ -350,7 +353,7 @@ export async function fetchLatest(base: string): Promise<LatestPayload> {
 
 export async function fetchHistory(base: string, limit = HISTORY_LIMIT): Promise<HistoryPayload> {
   const payload = parseHistory(
-    await requestJson(endpoint(base, `/api/sensors/history?limit=${encodeURIComponent(String(limit))}`)),
+    await requestJson(base, `/api/sensors/history?limit=${encodeURIComponent(String(limit))}`),
   );
   if (!payload) {
     throw new SensorApiError('The history response was not valid.');
@@ -359,7 +362,7 @@ export async function fetchHistory(base: string, limit = HISTORY_LIMIT): Promise
 }
 
 export async function fetchStatus(base: string): Promise<SensorStatusPayload> {
-  const payload = parseStatus(await requestJson(endpoint(base, '/api/status')));
+  const payload = parseStatus(await requestJson(base, '/api/status'));
   if (!payload) {
     throw new SensorApiError('The status response was not valid.');
   }

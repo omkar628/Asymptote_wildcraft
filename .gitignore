@@ -46,3 +46,15 @@ backend/data/*.csv
 # generated native folders
 /ios
 /android
+
+# Wildcraft desktop and local inference
+desktop/node_modules/
+desktop/dist/
+desktop/dist-electron/
+desktop/dist-test/
+desktop/release/
+inference/.venv/
+inference/data/*
+!inference/data/.gitkeep
+*.pt
+models/*.pt

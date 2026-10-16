@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from serial_collector import collect_lines
+from serial_collector import collect_lines, format_reading
 
 CLOCK = "2026-10-11T18:04:00.123+05:30"
 SAMPLE = """Received packet: Temp:31.70,Hum:45.70,MQ135:418,MQ9:479
@@ -98,6 +98,54 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(readings[0].mq135_text, "30")
         self.assertEqual(readings[0].mq9_text, "40")
         self.assertEqual(readings[0].rssi_text, "-4")
+
+    def test_flame_packet_is_complete_without_rssi(self) -> None:
+        readings = collect_lines(
+            ["Received packet: Temp:29.60,Hum:70.50,MQ135:377,MQ9:356,Flame:0"],
+            clock=lambda: CLOCK,
+        )
+        self.assertEqual(len(readings), 1)
+        self.assertEqual(readings[0].temp_text, "29.60")
+        self.assertEqual(readings[0].humidity_text, "70.50")
+        self.assertEqual(readings[0].mq135_text, "377")
+        self.assertEqual(readings[0].mq9_text, "356")
+        self.assertEqual(readings[0].flame_text, "0")
+        self.assertIsNone(readings[0].rssi_dbm)
+        self.assertNotIn("flame", readings[0].as_dict())
+        self.assertEqual(
+            format_reading(readings[0]),
+            "Temp: 29.60 \u00b0C | Humidity: 70.50% | MQ135: 377 | MQ9: 356 | Flame: 0",
+        )
+
+    def test_repeated_prefixes_and_concatenated_packets(self) -> None:
+        line = (
+            "Received packet: Received packet: Received packet: "
+            "Temp:29.60,Hum:70.50,MQ135:377,MQ9:356,Flame:0"
+            "Received packet: Temp:30.00,Hum:71.00,MQ135:380,MQ9:360,Flame:1"
+        )
+        readings = collect_lines([line.replace("\n", ""), "\r"])
+        self.assertEqual(len(readings), 2)
+        self.assertEqual(readings[0].flame_text, "0")
+        self.assertEqual(readings[1].temp_text, "30.00")
+        self.assertEqual(readings[1].flame_text, "1")
+
+    def test_carriage_return_and_spaces_around_flame(self) -> None:
+        readings = collect_lines(
+            ["Received packet:\rTemp: 29.60, Hum: 70.50, MQ135: 377, MQ9: 356, Flame: 0\r"]
+        )
+        self.assertEqual(len(readings), 1)
+        self.assertEqual(readings[0].flame_text, "0")
+        self.assertEqual(readings[0].temp_c, 29.60)
+
+    def test_incomplete_or_invalid_text_is_not_a_reading(self) -> None:
+        readings = collect_lines(
+            [
+                "Received packet: Received packet:",
+                "Received packet: Temp:29.60,Hum:70.50,MQ135:377",
+                "Received packet: Temp:bad,Hum:1,MQ135:2,MQ9:3,Flame:0",
+            ]
+        )
+        self.assertEqual(readings, [])
 
     def test_spaces_and_case_are_accepted(self) -> None:
         readings = collect_lines(

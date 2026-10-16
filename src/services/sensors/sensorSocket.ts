@@ -32,6 +32,7 @@ export function openSensorSocket(url: string, handlers: SocketHandlers): () => v
   let socket: WebSocket | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
   let delay = 1000;
+  let loggedClose = false;
 
   const open = () => {
     if (stopped) {
@@ -70,6 +71,10 @@ export function openSensorSocket(url: string, handlers: SocketHandlers): () => v
         return;
       }
       handlers.onPhase('disconnected');
+      if (!loggedClose) {
+        loggedClose = true;
+        console.warn(`[wildcraft] WebSocket closed: ${url}`);
+      }
       retry = setTimeout(open, delay);
       delay = Math.min(delay * 2, 15000);
     };

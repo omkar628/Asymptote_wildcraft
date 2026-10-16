@@ -9,10 +9,16 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.asymptote.tadobawatch"
+      "bundleIdentifier": "com.asymptote.tadobawatch",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
     },
     "android": {
       "package": "com.asymptote.tadobawatch",
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#123C2D",
         "foregroundImage": "./assets/android-icon-foreground.png",

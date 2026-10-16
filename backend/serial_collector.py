@@ -1,13 +1,15 @@
 """Parse the NodeMCU receiver stream, log it, and read COM port data on a thread.
 
-Expected serial text, one field group per packet:
+Expected serial text. The "Received packet:" prefix may be absent or repeated,
+and Flame is optional:
 
+    Received packet: Temp:29.60,Hum:70.50,MQ135:377,MQ9:356,Flame:0
     Received packet: Temp:31.70,Hum:45.70,MQ135:418,MQ9:479
     RSSI: -32
-    -----------------------------------
 
-RSSI is attached to the packet line that came before it. The API process does
-not invent readings when the port is quiet.
+RSSI is attached to the packet line that came before it. A packet that already
+includes Flame is complete on its own. The API process does not invent readings
+when the port is quiet.
 """
 
 from __future__ import annotations
@@ -35,14 +37,16 @@ CSV_COLUMNS = [
 
 _NUMBER = r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)"
 PACKET_RE = re.compile(
-    rf"^Received packet:\s*"
-    rf"Temp:\s*({_NUMBER})\s*,\s*"
-    rf"Hum:\s*({_NUMBER})\s*,\s*"
-    rf"MQ135:\s*({_NUMBER})\s*,\s*"
-    rf"MQ9:\s*({_NUMBER})\s*$",
+    rf"(?:Received\s+packet:\s*)*"
+    rf"Temp:\s*(?P<temp>{_NUMBER})\s*,\s*"
+    rf"Hum:\s*(?P<hum>{_NUMBER})\s*,\s*"
+    rf"MQ135:\s*(?P<mq135>{_NUMBER})\s*,\s*"
+    rf"MQ9:\s*(?P<mq9>{_NUMBER})"
+    rf"(?:\s*,\s*Flame:\s*(?P<flame>{_NUMBER}))?",
     re.IGNORECASE,
 )
 RSSI_RE = re.compile(rf"^RSSI:\s*({_NUMBER})\s*$", re.IGNORECASE)
+TRAILING_RSSI_RE = re.compile(rf"RSSI:\s*({_NUMBER})", re.IGNORECASE)
 SEPARATOR_RE = re.compile(r"^-{3,}\s*$")
 
 
@@ -101,6 +105,7 @@ class SensorReading:
     mq135_text: str
     mq9_text: str
     rssi_text: str
+    flame_text: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -114,19 +119,41 @@ class SensorReading:
         }
 
 
-def parse_packet(line: str) -> dict[str, str] | None:
-    match = PACKET_RE.match(line.strip())
-    if match is None:
-        return None
+def format_reading(reading: SensorReading) -> str:
+    parts = [
+        f"Temp: {reading.temp_text} \u00b0C",
+        f"Humidity: {reading.humidity_text}%",
+        f"MQ135: {reading.mq135_text}",
+        f"MQ9: {reading.mq9_text}",
+    ]
+    if reading.flame_text:
+        parts.append(f"Flame: {reading.flame_text}")
+    return " | ".join(parts)
+
+
+def _packet_tokens(match: re.Match[str]) -> dict[str, str] | None:
     tokens = {
-        "temp_text": match.group(1),
-        "humidity_text": match.group(2),
-        "mq135_text": match.group(3),
-        "mq9_text": match.group(4),
+        "temp_text": match.group("temp"),
+        "humidity_text": match.group("hum"),
+        "mq135_text": match.group("mq135"),
+        "mq9_text": match.group("mq9"),
+        "flame_text": match.group("flame") or "",
     }
-    if any(_finite(value) is None for value in tokens.values()):
+    required = (tokens["temp_text"], tokens["humidity_text"], tokens["mq135_text"], tokens["mq9_text"])
+    if any(_finite(value) is None for value in required):
+        return None
+    if tokens["flame_text"] and _finite(tokens["flame_text"]) is None:
         return None
     return tokens
+
+
+def parse_packets(line: str) -> list[tuple[dict[str, str], int]]:
+    found: list[tuple[dict[str, str], int]] = []
+    for match in PACKET_RE.finditer(line):
+        tokens = _packet_tokens(match)
+        if tokens is not None:
+            found.append((tokens, match.end()))
+    return found
 
 
 def parse_rssi(line: str) -> str | None:
@@ -147,33 +174,46 @@ class PacketAssembler:
         self._pending: dict[str, str] | None = None
         self.last_event = "ignored"
 
-    def feed(self, line: str) -> SensorReading | None:
-        stripped = line.strip()
+    def feed(self, line: str) -> list[SensorReading]:
+        stripped = line.replace("\r", " ").strip()
         if not stripped:
             self.last_event = "ignored"
-            return None
+            return []
         if SEPARATOR_RE.match(stripped):
             self.last_event = "separator"
-            return None
-        packet = parse_packet(stripped)
-        if packet is not None:
-            previous = self._pending
-            self._pending = {**packet, "timestamp": self._clock()}
-            self.last_event = "packet"
-            if previous is not None:
-                return self._to_reading(previous, None)
-            return None
+            return []
+        packets = parse_packets(stripped)
+        if packets:
+            return self._consume_packets(stripped, packets)
         rssi = parse_rssi(stripped)
         if rssi is not None:
             if self._pending is None:
                 self.last_event = "rssi_orphan"
-                return None
+                return []
             pending = self._pending
             self._pending = None
             self.last_event = "rssi"
-            return self._to_reading(pending, rssi)
+            return [self._to_reading(pending, rssi)]
         self.last_event = "unrecognized"
-        return None
+        return []
+
+    def _consume_packets(self, text: str, packets: list[tuple[dict[str, str], int]]) -> list[SensorReading]:
+        readings: list[SensorReading] = []
+        if self._pending is not None:
+            readings.append(self._to_reading(self._pending, None))
+            self._pending = None
+        last_index = len(packets) - 1
+        for index, (packet, end) in enumerate(packets):
+            pending = {**packet, "timestamp": self._clock()}
+            last = index == last_index
+            rssi = _last_rssi(text, end) if last else None
+            complete = bool(packet["flame_text"]) or rssi is not None or not last
+            if complete:
+                readings.append(self._to_reading(pending, rssi))
+            else:
+                self._pending = pending
+        self.last_event = "packet"
+        return readings
 
     def _to_reading(self, pending: dict[str, str], rssi_text: str | None) -> SensorReading:
         rssi_value = None if rssi_text is None else float(rssi_text)
@@ -189,16 +229,25 @@ class PacketAssembler:
             mq135_text=pending["mq135_text"],
             mq9_text=pending["mq9_text"],
             rssi_text="" if rssi_text is None else rssi_text,
+            flame_text=pending.get("flame_text", ""),
         )
+
+
+def _last_rssi(text: str, start: int) -> str | None:
+    match = TRAILING_RSSI_RE.search(text, start)
+    if match is None:
+        return None
+    token = match.group(1)
+    if _finite(token) is None:
+        return None
+    return token
 
 
 def collect_lines(lines: list[str], clock: Callable[[], str] | None = None) -> list[SensorReading]:
     assembler = PacketAssembler(clock=clock)
     readings: list[SensorReading] = []
     for line in lines:
-        reading = assembler.feed(line)
-        if reading is not None:
-            readings.append(reading)
+        readings.extend(assembler.feed(line))
     return readings
 
 
@@ -353,52 +402,44 @@ class SerialCollector(threading.Thread):
             log_line("[sensor] pyserial is not installed. The API will keep running without serial collection.")
             return
 
-        announced = False
+        reported_error: str | None = None
         while not self._stop.is_set():
             self._on_status("connecting", False, None)
             try:
-                log_line(f"[sensor] Opening {self.port} at {self.baud_rate} baud")
                 # DTR/RTS stay off. The NodeMCU reset circuit uses those lines, and
                 # the default open pulse restarts a receiver that is already running.
                 with open_receiver_port(self.port, self.baud_rate) as handle:
                     self._on_status("connected", True, None)
-                    announced = False
-                    log_line(f"[sensor] Connected to {self.port}")
+                    reported_error = None
                     assembler = PacketAssembler()
-                    unrecognized = 0
                     while not self._stop.is_set():
                         raw = handle.readline()
                         if not raw:
                             continue
-                        line = raw.decode("utf-8", errors="replace").strip()
-                        if not line:
-                            continue
-                        reading = assembler.feed(line)
-                        if reading is not None:
-                            try:
-                                self._on_reading(reading)
-                            except Exception as exc:
-                                log_line(f"[sensor] Could not store a reading: {exc}")
-                        elif assembler.last_event == "unrecognized":
-                            unrecognized += 1
-                            if unrecognized <= 3 or unrecognized % 25 == 0:
-                                log_line(
-                                    f"[sensor] Ignored unrecognized serial line ({unrecognized}): {line[:160]}"
-                                )
+                        text = raw.decode("utf-8", errors="replace").replace("\r", "\n")
+                        for line in text.split("\n"):
+                            for reading in assembler.feed(line):
+                                try:
+                                    self._on_reading(reading)
+                                except Exception as exc:
+                                    log_line(f"[sensor] Could not store a reading: {exc}")
             except (SerialException, OSError) as exc:
                 self._on_status("reconnecting", False, str(exc))
-                if not announced:
-                    log_line(f"[sensor] Could not read {self.port}: {exc}")
-                    log_line("[sensor] Close the Arduino Serial Monitor if it is open. Retrying in 2 seconds.")
-                    announced = True
-                else:
-                    log_line(f"[sensor] Still waiting for {self.port}: {exc}")
+                message = str(exc)
+                if message != reported_error:
+                    log_line(
+                        f"[sensor] Could not read {self.port}: {exc}. "
+                        "Close any other program using this port."
+                    )
+                    reported_error = message
                 if self._stop.wait(2):
                     break
             except Exception as exc:
                 self._on_status("reconnecting", False, str(exc))
-                log_line(f"[sensor] Serial collector error: {exc}")
+                message = str(exc)
+                if message != reported_error:
+                    log_line(f"[sensor] Serial collector error: {exc}")
+                    reported_error = message
                 if self._stop.wait(2):
                     break
         self._on_status("disconnected", False, None)
-        log_line("[sensor] Serial collector stopped")

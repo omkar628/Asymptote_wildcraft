@@ -1,0 +1,61 @@
+{
+  "name": "wildcraft-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist-electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n vite,app \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"node scripts/dev-electron.mjs\"",
+    "build:renderer": "vite build",
+    "build:electron": "node scripts/build-electron.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "test": "node scripts/test-unit.mjs",
+    "smoke": "npm run build:renderer && npm run build:electron && node scripts/smoke.mjs",
+    "dist": "npm run typecheck && npm run build:renderer && npm run build:electron && electron-builder --win"
+  },
+  "dependencies": {
+    "lucide-react": "0.544.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "sql.js": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "@types/react": "~19.2.2",
+    "@types/react-dom": "~19.2.2",
+    "@vitejs/plugin-react": "^5.0.4",
+    "concurrently": "^9.2.1",
+    "electron": "^35.7.5",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.10",
+    "typescript": "~6.0.3",
+    "vite": "^7.1.9"
+  },
+  "build": {
+    "appId": "com.asymptote.wildcraft",
+    "productName": "Wildcraft",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "node_modules/sql.js/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "dist-electron/sql-wasm.wasm"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Wildcraft"
+    }
+  }
+}

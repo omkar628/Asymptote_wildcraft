@@ -34,11 +34,21 @@ if ($LASTEXITCODE -ne 0) {
   throw "Could not install backend requirements."
 }
 
+$wifi = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi" -ErrorAction SilentlyContinue |
+  Where-Object { $_.IPAddress -notlike "169.254.*" } |
+  Select-Object -First 1
+
 Write-Host ""
 Write-Host "Forest sensor backend"
 Write-Host "  Close PlatformIO device monitor and the Arduino Serial Monitor if either one is using COM6."
 Write-Host "  Default serial port: COM6 at 115200 baud."
 Write-Host "  Logging continues while the phone is disconnected."
+if ($wifi) {
+  Write-Host "  Phone URL: http://$($wifi.IPAddress):8000"
+  Write-Host "  Phone WebSocket: ws://$($wifi.IPAddress):8000/ws/sensors"
+} else {
+  Write-Host "  Phone URL: run ipconfig and use the Wi-Fi IPv4 address with port 8000."
+}
 Write-Host "  Press Ctrl+C to stop."
 Write-Host ""
 
