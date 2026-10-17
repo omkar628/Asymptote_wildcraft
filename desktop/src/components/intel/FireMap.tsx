@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState, type RefObject } from 'react';
-import { MapContainer, Marker, Rectangle, ScaleControl, TileLayer, useMap, useMapEvents } from 'react-leaflet';
+import { MapContainer, Marker, Polygon, Rectangle, ScaleControl, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import * as L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
 import type { BBox } from '../../intel/areas';
 import { boxFromCorners } from '../../intel/areas';
+import { pointInRing, type LatLonRing } from '../../intel/geometry';
 import { confidenceColor, hotspotIdentity, type Hotspot } from '../../intel/firmsClient';
 import { hexAlpha, type ScoredCell } from '../../intel/riskGrid';
+import { TADOBA_GATES, TADOBA_OUTLINE } from '../../intel/tadobaPlaces';
+import { MapOpsLayer } from './MapOpsLayer';
 
 export type BasemapId = 'street' | 'satellite';
 
@@ -26,11 +29,19 @@ type FireMapProps = {
   showFrp: boolean;
   cells: ScoredCell[];
   showRisk: boolean;
+  showSensitive: boolean;
+  showSpread: boolean;
+  spreadRing: LatLonRing | null;
   riskOpacity: number;
   selectedCellId: string | null;
   selectedHotspotKey: string | null;
   wind: { lat: number; lon: number; fromDeg: number; speedKmh: number } | null;
   showWind: boolean;
+  showGates: boolean;
+  showAreaBox: boolean;
+  sensorPin: { lat: number; lon: number } | null;
+  cameraPin: { lat: number; lon: number } | null;
+  ignitionPin: { lat: number; lon: number; label: string } | null;
   drawMode: boolean;
   drawAnchor: { lat: number; lon: number } | null;
   readoutRef: RefObject<HTMLSpanElement | null>;
@@ -89,7 +100,28 @@ function prepareCanvas(canvas: HTMLCanvasElement, map: L.Map): CanvasRenderingCo
   return context;
 }
 
-function RiskCanvas({ cells, opacity, selectedId }: { cells: ScoredCell[]; opacity: number; selectedId: string | null }) {
+function pinIcon(mark: string, color: string, label: string): L.DivIcon {
+  return L.divIcon({
+    className: 'map-pin',
+    html: `<span class="map-pin-mark" style="background:${color}">${mark}</span><span class="map-pin-label">${label}</span>`,
+    iconSize: [148, 28],
+    iconAnchor: [12, 14],
+  });
+}
+
+function RiskCanvas({
+  cells,
+  opacity,
+  selectedId,
+  showRisk,
+  showSensitive,
+}: {
+  cells: ScoredCell[];
+  opacity: number;
+  selectedId: string | null;
+  showRisk: boolean;
+  showSensitive: boolean;
+}) {
   const map = useMap();
   useEffect(() => {
     const pane = map.getPane('riskPane') ?? map.createPane('riskPane');
@@ -103,7 +135,6 @@ function RiskCanvas({ cells, opacity, selectedId }: { cells: ScoredCell[]; opaci
       if (!context) return;
       const size = map.getSize();
       for (const cell of cells) {
-        if (!cell.risk.color || cell.risk.score === null) continue;
         const southWest = map.latLngToContainerPoint([cell.south, cell.west]);
         const northEast = map.latLngToContainerPoint([cell.north, cell.east]);
         const x = Math.min(southWest.x, northEast.x);
@@ -111,8 +142,18 @@ function RiskCanvas({ cells, opacity, selectedId }: { cells: ScoredCell[]; opaci
         const width = Math.abs(northEast.x - southWest.x);
         const height = Math.abs(northEast.y - southWest.y);
         if (x > size.x || y > size.y || x + width < 0 || y + height < 0) continue;
-        context.fillStyle = hexAlpha(cell.risk.color, opacity);
-        context.fillRect(x, y, width, height);
+        const sensitive = showSensitive && cell.sensitivity?.color && cell.sensitivity.score !== null;
+        const risk = showRisk && cell.risk.color && cell.risk.score !== null;
+        if (!sensitive && !risk) continue;
+        if (sensitive && cell.sensitivity?.color) {
+          context.fillStyle = hexAlpha(cell.sensitivity.color, opacity);
+          context.fillRect(x, y, width, height);
+        }
+        if (risk && cell.risk.color) {
+          const inset = sensitive ? 0.22 : 0;
+          context.fillStyle = hexAlpha(cell.risk.color, sensitive ? Math.min(0.95, opacity + 0.15) : opacity);
+          context.fillRect(x + width * inset, y + height * inset, width * (1 - inset * 2), height * (1 - inset * 2));
+        }
         if (cell.id === selectedId) {
           context.strokeStyle = '#17231d';
           context.lineWidth = 2;
@@ -126,7 +167,47 @@ function RiskCanvas({ cells, opacity, selectedId }: { cells: ScoredCell[]; opaci
       map.off('move zoom viewreset resize', draw);
       canvas.remove();
     };
-  }, [map, cells, opacity, selectedId]);
+  }, [map, cells, opacity, selectedId, showRisk, showSensitive]);
+  return null;
+}
+
+function SpreadCanvas({ cells, opacity }: { cells: ScoredCell[]; opacity: number }) {
+  const map = useMap();
+  useEffect(() => {
+    const pane = map.getPane('spreadPane') ?? map.createPane('spreadPane');
+    pane.style.zIndex = '430';
+    pane.style.pointerEvents = 'none';
+    const canvas = document.createElement('canvas');
+    canvas.className = 'intel-canvas';
+    pane.appendChild(canvas);
+    const draw = () => {
+      const context = prepareCanvas(canvas, map);
+      if (!context) return;
+      const size = map.getSize();
+      for (const cell of cells) {
+        const intensity = cell.spreadIntensity;
+        if (intensity === null || intensity === undefined || intensity <= 0) continue;
+        const southWest = map.latLngToContainerPoint([cell.south, cell.west]);
+        const northEast = map.latLngToContainerPoint([cell.north, cell.east]);
+        const x = Math.min(southWest.x, northEast.x);
+        const y = Math.min(southWest.y, northEast.y);
+        const width = Math.abs(northEast.x - southWest.x);
+        const height = Math.abs(northEast.y - southWest.y);
+        if (x > size.x || y > size.y || x + width < 0 || y + height < 0) continue;
+        const red = Math.round(244 - intensity * 90);
+        const green = Math.round(193 - intensity * 150);
+        const blue = Math.round(106 - intensity * 80);
+        context.fillStyle = `rgba(${red}, ${green}, ${blue}, ${0.18 + intensity * opacity})`;
+        context.fillRect(x, y, width, height);
+      }
+    };
+    map.on('move zoom viewreset resize', draw);
+    draw();
+    return () => {
+      map.off('move zoom viewreset resize', draw);
+      canvas.remove();
+    };
+  }, [map, cells, opacity]);
   return null;
 }
 
@@ -149,13 +230,16 @@ function HotspotCanvas({ hotspots, showFrp, selectedKey }: { hotspots: Hotspot[]
         const point = map.latLngToContainerPoint([hotspot.latitude, hotspot.longitude]);
         if (point.x < -20 || point.y < -20 || point.x > size.x + 20 || point.y > size.y + 20) continue;
         const radius = zoom >= 12 ? 7 : 5;
+        const inside = pointInRing(hotspot.latitude, hotspot.longitude, TADOBA_OUTLINE);
         context.beginPath();
-        context.fillStyle = confidenceColor(hotspot.confidence);
-        context.arc(point.x, point.y, radius, 0, Math.PI * 2);
-        context.fill();
-        context.lineWidth = 1;
+        context.lineWidth = inside ? 1 : 2;
         context.strokeStyle = '#17231d';
+        context.fillStyle = inside ? confidenceColor(hotspot.confidence) : 'rgba(255,255,255,0.2)';
+        context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+        if (inside) context.fill();
+        else context.setLineDash([2, 2]);
         context.stroke();
+        context.setLineDash([]);
         if (hotspotIdentity(hotspot) === selectedKey) {
           context.beginPath();
           context.lineWidth = 2;
@@ -191,6 +275,11 @@ function MapBridge({ onMap, onReady, onView, onZoom }: { onMap: (map: L.Map) => 
     if (!map.getPane('aoiPane')) {
       const pane = map.createPane('aoiPane');
       pane.style.zIndex = '460';
+    }
+    if (!map.getPane('spreadPane')) {
+      const pane = map.createPane('spreadPane');
+      pane.style.zIndex = '430';
+      pane.style.pointerEvents = 'none';
     }
     onMap(map);
     onReady();
@@ -350,18 +439,63 @@ export function FireMap(props: FireMapProps) {
           tileerror: () => props.onTiles('error'),
         }}
       />
-      {props.showRisk ? <RiskCanvas cells={props.cells} opacity={props.riskOpacity} selectedId={props.selectedCellId} /> : null}
+      {props.showRisk || props.showSensitive ? (
+        <RiskCanvas
+          cells={props.cells}
+          opacity={props.riskOpacity}
+          selectedId={props.selectedCellId}
+          showRisk={props.showRisk}
+          showSensitive={props.showSensitive}
+        />
+      ) : null}
+      {props.showSpread ? <SpreadCanvas cells={props.cells} opacity={props.riskOpacity} /> : null}
       {props.showHotspots ? (
         <HotspotCanvas hotspots={props.hotspots} showFrp={props.showFrp} selectedKey={props.selectedHotspotKey} />
       ) : null}
-      <Rectangle
-        pane="aoiPane"
-        bounds={[
-          [props.area.south, props.area.west],
-          [props.area.north, props.area.east],
-        ]}
-        pathOptions={{ color: '#0b2b21', weight: 2, dashArray: '6 5', fill: false }}
+      <Polygon
+        positions={TADOBA_OUTLINE}
+        interactive={false}
+        pathOptions={{ color: '#0b2b21', weight: 3, fill: false }}
       />
+      {props.showSpread && props.spreadRing ? (
+        <Polygon
+          pane="spreadPane"
+          positions={props.spreadRing}
+          interactive={false}
+          pathOptions={{ color: '#9b1d14', weight: 2, dashArray: '5 4', fillColor: '#e08a2c', fillOpacity: 0.12 }}
+        />
+      ) : null}
+      {props.showAreaBox ? (
+        <Rectangle
+          pane="aoiPane"
+          bounds={[
+            [props.area.south, props.area.west],
+            [props.area.north, props.area.east],
+          ]}
+          pathOptions={{ color: '#0b2b21', weight: 2, dashArray: '6 5', fill: false }}
+        />
+      ) : null}
+      {props.showGates
+        ? TADOBA_GATES.map((gate) => (
+            <Marker
+              key={gate.id}
+              position={[gate.lat, gate.lon]}
+              icon={pinIcon('G', '#1d4e89', gate.name)}
+              title={`${gate.name}. ${gate.source}. This is a community point, not a surveyed headquarters.`}
+            />
+          ))
+        : null}
+      <MapOpsLayer />
+      {props.cameraPin ? (
+        <Marker position={[props.cameraPin.lat, props.cameraPin.lon]} icon={pinIcon('C', '#5c4b8a', 'Camera')} title="Configured camera location. A detection here is not a ground-fire coordinate." />
+      ) : null}
+      {props.ignitionPin ? (
+        <Marker
+          position={[props.ignitionPin.lat, props.ignitionPin.lon]}
+          icon={pinIcon('I', '#9b1d14', props.ignitionPin.label)}
+          title="Selected ignition for the illustrative spread scenario"
+        />
+      ) : null}
       {preview ? (
         <Rectangle
           pane="aoiPane"

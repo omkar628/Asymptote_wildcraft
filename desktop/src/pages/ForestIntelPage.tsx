@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { Map as LeafletMap } from 'leaflet';
 
+import { ArrivalCard, DroneOpsPanel, OpsBridge, OpsStatus } from '../components/intel/DroneOpsPanel';
 import { FireMap, type BasemapId, type MapFeature } from '../components/intel/FireMap';
 import { TrendChart } from '../components/TrendChart';
 import { areaCenter, boxFromCorners, formatCoord, parseCoordinate, roundBox, TADOBA_LABEL, TADOBA_RANGE, type BBox } from '../intel/areas';
+import { MODEL_VERSION, rawMqAlert, sensitivityScore, sensorIsFresh, spreadIntensity, SPREAD_LABEL } from '../intel/fireModel';
 import {
   FIRMS_PRODUCTS,
   firmsErrorMessage,
@@ -14,23 +16,32 @@ import {
   type FirmsSourceStatus,
   type Hotspot,
 } from '../intel/firmsClient';
+import { pointInRing } from '../intel/geometry';
+import { loadRainWindow, type RainWindow } from '../intel/rainfall';
 import {
   buildCells,
   cellAt,
+  distanceMeters,
+  distanceToCellMeters,
   formatDistance,
   intersectBounds,
   nearestHotspots,
   scoreGrid,
 } from '../intel/riskGrid';
+import { loadScenario, type SpreadScenario } from '../intel/scenarioClient';
+import { DATASET_STATUS, TADOBA_BOUNDARY_NOTE, TADOBA_HEADQUARTERS, TADOBA_MAP_BOUNDS, TADOBA_OUTLINE, TADOBA_VIEW_POINT } from '../intel/tadobaPlaces';
 import { loadWeather, roundWeatherPoint, searchPlaces, type PlaceHit, type WeatherReport } from '../intel/weather';
+import { getOpsDocument, setFollow, setLaunch } from '../ops/opsStore';
 import { formatPacketTime } from '../services/format';
 import { useForest } from '../state/ForestContext';
+import type { DetectionRecord } from '../../shared/types';
 
 type FirmsWindow = '24h' | '48h' | '7d' | 'custom';
 type FirmsStatus = 'loading' | 'ready' | 'empty' | 'error' | 'unconfigured';
 type Selection = { kind: 'point' | 'hotspot' | 'cell'; lat: number; lon: number; hotspot: Hotspot | null };
 
 const CELL_SIZES = [250, 500, 1000] as const;
+const EMPTY_EVENTS: DetectionRecord[] = [];
 
 function firmsDaysFor(window: FirmsWindow, customDays: number): number {
   if (window === '24h') return 1;
@@ -56,12 +67,34 @@ function metric(value: number | null, digits: number, unit: string): string {
   return value === null ? 'Unavailable' : `${value.toFixed(digits)} ${unit}`;
 }
 
+function storedPin(key: string): { lat: number; lon: number } | null {
+  try {
+    const text = localStorage.getItem(key);
+    if (!text) return null;
+    const parsed = JSON.parse(text) as { lat?: unknown; lon?: unknown };
+    if (typeof parsed.lat !== 'number' || typeof parsed.lon !== 'number') return null;
+    if (parsed.lat < -90 || parsed.lat > 90 || parsed.lon < -180 || parsed.lon > 180) return null;
+    return { lat: parsed.lat, lon: parsed.lon };
+  } catch {
+    return null;
+  }
+}
+
+function savePin(key: string, pin: { lat: number; lon: number } | null) {
+  try {
+    if (!pin) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(pin));
+  } catch {
+    // The map still keeps the pin for this session when storage is blocked.
+  }
+}
+
 export function ForestIntelPage() {
   const { settings, sensor, inference } = useForest();
   const backendUrl = settings?.backendUrl ?? '';
-  const initial = areaCenter(TADOBA_RANGE);
-  const [area, setArea] = useState<BBox>(TADOBA_RANGE);
-  const [areaName, setAreaName] = useState(TADOBA_LABEL);
+  const initial = TADOBA_VIEW_POINT;
+  const [area, setArea] = useState<BBox>(TADOBA_MAP_BOUNDS);
+  const [areaName, setAreaName] = useState('Tadoba mapped outline');
   const [fitToken, setFitToken] = useState(1);
   const [panToken, setPanToken] = useState(0);
   const [panTarget, setPanTarget] = useState<{ lat: number; lon: number } | null>(null);
@@ -70,6 +103,9 @@ export function ForestIntelPage() {
   const [showHotspots, setShowHotspots] = useState(true);
   const [showFrp, setShowFrp] = useState(true);
   const [showRisk, setShowRisk] = useState(true);
+  const [showSensitive, setShowSensitive] = useState(true);
+  const [showSpread, setShowSpread] = useState(true);
+  const [showGates, setShowGates] = useState(true);
   const [showWeather, setShowWeather] = useState(true);
   const [showWind, setShowWind] = useState(true);
   const [cellMeters, setCellMeters] = useState<(typeof CELL_SIZES)[number]>(1000);
@@ -77,7 +113,17 @@ export function ForestIntelPage() {
   const [firmsWindow, setFirmsWindow] = useState<FirmsWindow>('24h');
   const [customDate, setCustomDate] = useState('');
   const [customDays, setCustomDays] = useState(2);
-  const [forecastHours, setForecastHours] = useState<6 | 12 | 24 | 48>(24);
+  const [forecastHours, setForecastHours] = useState<6 | 12 | 24>(24);
+  const [sensorPin, setSensorPin] = useState<{ lat: number; lon: number } | null>(() => storedPin('wildcraft.sensorPin'));
+  const [cameraPin, setCameraPin] = useState<{ lat: number; lon: number } | null>(() => storedPin('wildcraft.cameraPin'));
+  const [ignition, setIgnition] = useState<{ lat: number; lon: number; kind: 'firms' | 'hypothetical' } | null>(null);
+  const [pickMode, setPickMode] = useState<'none' | 'sensor' | 'camera' | 'ignition' | 'launch'>('none');
+  const [scenario, setScenario] = useState<SpreadScenario | null>(null);
+  const [scenarioMessage, setScenarioMessage] = useState('Choose a FIRMS detection or a hypothetical ignition. No ignition is invented.');
+  const [stepIndex, setStepIndex] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [rain, setRain] = useState<RainWindow | null>(null);
+  const [sensorLog, setSensorLog] = useState<Array<{ at: string; text: string }>>([]);
   const [product, setProduct] = useState<string>(FIRMS_PRODUCTS[0].id);
   const [satelliteFilter, setSatelliteFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState('all');
@@ -108,6 +154,7 @@ export function ForestIntelPage() {
   const readoutRef = useRef<HTMLSpanElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const firmsSeq = useRef(0);
+  const sourceRef = useRef<FirmsSourceStatus | null>(null);
   const weatherSeq = useRef(0);
   const weatherRef = useRef<WeatherReport | null>(null);
   weatherRef.current = weather;
@@ -135,7 +182,8 @@ export function ForestIntelPage() {
         const status = await loadFirmsStatus(backendUrl);
         if (firmsSeq.current !== id) return;
         setSource(status);
-        if (status && !status.configured) {
+        sourceRef.current = status;
+        if (!status.configured) {
           setFirms(null);
           setFirmsStatus('unconfigured');
           setFirmsMessage('NASA FIRMS is not configured. Set NASA_FIRMS_MAP_KEY in backend/.env and restart the sensor API.');
@@ -152,7 +200,7 @@ export function ForestIntelPage() {
         );
       } catch (error) {
         if (firmsSeq.current !== id) return;
-        const parsed = firmsErrorMessage(error);
+        const parsed = firmsErrorMessage(error, backendUrl, sourceRef.current?.lastSuccessAt ?? null);
         setFirms(null);
         setFirmsStatus(parsed.status);
         setFirmsMessage(parsed.message);
@@ -242,18 +290,21 @@ export function ForestIntelPage() {
     if (!view) return box;
     return intersectBounds(box, view) ?? box;
   }, [area, view]);
-  const built = useMemo(() => (showRisk ? buildCells(gridBounds, cellMeters, center.lat) : { cells: [], estimated: 0, truncated: false }), [
-    cellMeters,
-    center.lat,
-    gridBounds,
-    showRisk,
-  ]);
+  const built = useMemo(
+    () => (showRisk || showSensitive || showSpread ? buildCells(gridBounds, cellMeters, center.lat) : { cells: [], estimated: 0, truncated: false }),
+    [cellMeters, center.lat, gridBounds, showRisk, showSensitive, showSpread],
+  );
+  const outlineMode = areaName !== 'Custom area';
+  const clippedCells = useMemo(
+    () => (outlineMode ? built.cells.filter((cell) => pointInRing(cell.centerLat, cell.centerLon, TADOBA_OUTLINE)) : built.cells),
+    [built.cells, outlineMode],
+  );
   const absenceNote =
     firms && firms.hotspots.length > 0 && visibleHotspots.length === 0
       ? 'No FIRMS detections match the current satellite or date filter. Absence is not a safety finding.'
       : undefined;
   const scored = useMemo(() => {
-    if (!showRisk || built.truncated) return [];
+    if (built.truncated || (!showRisk && !showSensitive && !showSpread)) return [];
     const inputs = weatherReady && weather
       ? {
           temperatureC: weather.current.temperatureC,
@@ -262,9 +313,61 @@ export function ForestIntelPage() {
           windKmh: weather.current.windSpeedKmh,
         }
       : null;
-    return scoreGrid(built.cells, visibleHotspots, inputs, weatherReady, firmsKnown, center.lat, absenceNote);
-  }, [absenceNote, built.cells, built.truncated, center.lat, firmsKnown, showRisk, visibleHotspots, weather, weatherReady]);
-  const selectedCell = useMemo(() => cellAt(selection.lat, selection.lon, scored), [scored, selection.lat, selection.lon]);
+    return scoreGrid(clippedCells, visibleHotspots, inputs, weatherReady && showRisk, firmsKnown, center.lat, absenceNote);
+  }, [absenceNote, built.truncated, center.lat, clippedCells, firmsKnown, showRisk, showSensitive, showSpread, visibleHotspots, weather, weatherReady]);
+  const activeStep = scenario?.steps[stepIndex] ?? null;
+  const mapped = useMemo(() => {
+    const latest = sensor.latest;
+    const fresh = sensorIsFresh(latest?.timestamp ?? null, Date.now());
+    const alert = rawMqAlert(latest?.mq9_raw ?? null, latest?.mq135_raw ?? null);
+    const ring = activeStep?.polygon ?? null;
+    const origin = scenario?.ignition ?? null;
+    let maxM = 0;
+    if (ring && origin) {
+      for (const [lat, lon] of ring) {
+        maxM = Math.max(maxM, distanceMeters(origin.lat, origin.lon, lat, lon, origin.lat));
+      }
+    }
+    const weatherInputs = weatherReady && weather ? weather.current : null;
+    return scored.map((cell) => {
+      const sensorHere = Boolean(
+        sensorPin &&
+          latest &&
+          sensorPin.lon >= cell.west &&
+          sensorPin.lon <= cell.east &&
+          sensorPin.lat >= cell.south &&
+          sensorPin.lat <= cell.north,
+      );
+      let firmsDistance: number | null = null;
+      if (firmsKnown && visibleHotspots.length > 0) {
+        firmsDistance = Number.POSITIVE_INFINITY;
+        for (const hotspot of visibleHotspots) {
+          firmsDistance = Math.min(firmsDistance, distanceToCellMeters(hotspot.latitude, hotspot.longitude, cell, center.lat));
+        }
+      }
+      const sensitivity = sensitivityScore({
+        temperatureC: sensorHere && fresh && latest ? latest.temp_c : (weatherInputs?.temperatureC ?? null),
+        humidityPct: sensorHere && fresh && latest ? latest.humidity_percent : (weatherInputs?.humidityPct ?? null),
+        precipitationMm: weatherInputs?.precipitationMm ?? null,
+        windKmh: weatherInputs?.windSpeedKmh ?? null,
+        soilMoisture: weatherInputs?.soilMoisture ?? null,
+        firmsKnown,
+        hotspotCount: visibleHotspots.length,
+        firmsDistanceM: firmsDistance !== null && Number.isFinite(firmsDistance) ? firmsDistance : null,
+        sensorLocated: sensorHere,
+        sensorFresh: fresh,
+        sensorAlert: alert,
+        rainWindowMm: rain?.sumMm ?? null,
+      });
+      const insideSpread = Boolean(ring && pointInRing(cell.centerLat, cell.centerLon, ring));
+      const spreadValue =
+        origin && ring
+          ? spreadIntensity(distanceMeters(origin.lat, origin.lon, cell.centerLat, cell.centerLon, origin.lat), maxM, insideSpread)
+          : null;
+      return { ...cell, sensitivity, spreadIntensity: spreadValue };
+    });
+  }, [activeStep?.polygon, center.lat, firmsKnown, rain?.sumMm, scenario?.ignition, scored, sensor.latest, sensorPin, visibleHotspots, weather, weatherReady]);
+  const selectedCell = useMemo(() => cellAt(selection.lat, selection.lon, mapped), [mapped, selection.lat, selection.lon]);
   const nearby = useMemo(
     () => nearestHotspots(selection.lat, selection.lon, visibleHotspots, center.lat, 3),
     [center.lat, selection.lat, selection.lon, visibleHotspots],
@@ -293,12 +396,33 @@ export function ForestIntelPage() {
   }, []);
   const onFeature = useCallback((feature: MapFeature) => {
     setSideOpen(true);
+    const lat = feature.kind === 'hotspot' ? feature.hotspot.latitude : feature.lat;
+    const lon = feature.kind === 'hotspot' ? feature.hotspot.longitude : feature.lon;
+    if (pickMode === 'sensor') {
+      const pin = { lat, lon };
+      setSensorPin(pin);
+      savePin('wildcraft.sensorPin', pin);
+      setPickMode('none');
+    } else if (pickMode === 'camera') {
+      const pin = { lat, lon };
+      setCameraPin(pin);
+      savePin('wildcraft.cameraPin', pin);
+      setPickMode('none');
+    } else if (pickMode === 'ignition') {
+      setIgnition({ lat, lon, kind: feature.kind === 'hotspot' ? 'firms' : 'hypothetical' });
+      setPickMode('none');
+      setPlaying(false);
+      setStepIndex(0);
+    } else if (pickMode === 'launch') {
+      setLaunch({ lat, lon });
+      setPickMode('none');
+    }
     if (feature.kind === 'hotspot') {
-      setSelection({ kind: 'hotspot', lat: feature.hotspot.latitude, lon: feature.hotspot.longitude, hotspot: feature.hotspot });
+      setSelection({ kind: 'hotspot', lat, lon, hotspot: feature.hotspot });
       return;
     }
-    setSelection({ kind: feature.kind, lat: feature.lat, lon: feature.lon, hotspot: null });
-  }, []);
+    setSelection({ kind: feature.kind, lat, lon, hotspot: null });
+  }, [pickMode]);
   const onDrawCorner = useCallback(
     (lat: number, lon: number) => {
       if (!drawAnchor) {
@@ -324,21 +448,63 @@ export function ForestIntelPage() {
   );
 
   function choosePreset(value: string) {
+    if (value === 'core' || value === 'buffer') {
+      setDrawMessage('No official core or buffer polygon is connected. The map stays on the OpenStreetMap outline. NTCA reports 625.40 km² core and 1,101.77 km² buffer as areas, not as this line.');
+      return;
+    }
     if (value === 'custom') {
       setDrawMode(true);
       setDrawAnchor(null);
       setDrawMessage('Click the first corner of the monitoring area.');
       return;
     }
+    if (value === 'range') {
+      setDrawMode(false);
+      setDrawAnchor(null);
+      setArea(TADOBA_RANGE);
+      setAreaName(TADOBA_LABEL);
+      setDrawMessage('Dashed rectangle: NTCA published coordinate range. It is not the reserve boundary.');
+      setFitToken((valueToken) => valueToken + 1);
+      return;
+    }
     setDrawMode(false);
     setDrawAnchor(null);
     setDrawMessage(null);
-    setArea(TADOBA_RANGE);
-    setAreaName(TADOBA_LABEL);
-    const nextCenter = areaCenter(TADOBA_RANGE);
-    setSelection({ kind: 'point', lat: nextCenter.lat, lon: nextCenter.lon, hotspot: null });
+    setArea(TADOBA_MAP_BOUNDS);
+    setAreaName('Tadoba mapped outline');
+    setSelection({ kind: 'point', lat: TADOBA_VIEW_POINT.lat, lon: TADOBA_VIEW_POINT.lon, hotspot: null });
     setFitToken((valueToken) => valueToken + 1);
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadRainWindow(center.lat, center.lon).then((value) => {
+      if (!cancelled) setRain(value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [center.lat, center.lon]);
+
+  useEffect(() => {
+    if (!playing || (scenario?.steps.length ?? 0) < 2) return undefined;
+    const timer = window.setInterval(() => {
+      setStepIndex((index) => (index + 1) % (scenario?.steps.length ?? 1));
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [playing, scenario?.steps.length]);
+
+  useEffect(() => {
+    const latest = sensor.latest;
+    if (!latest) return;
+    const fresh = sensorIsFresh(latest.timestamp, Date.now());
+    const located = sensorPin ? `${sensorPin.lat.toFixed(4)},${sensorPin.lon.toFixed(4)}` : 'unlocated';
+    const text = `${fresh ? 'Fresh' : 'Stale or unparsed time'} · ${located} · ${latest.temp_c.toFixed(1)} °C · ${latest.humidity_percent.toFixed(0)}% · MQ135 ${latest.mq135_raw} raw · MQ9 ${latest.mq9_raw} raw`;
+    setSensorLog((rows) => {
+      if (rows[0]?.text === text) return rows;
+      return [{ at: latest.timestamp, text }, ...rows].slice(0, 8);
+    });
+  }, [sensor.latest, sensorPin]);
 
   function applyCoordinates(event: FormEvent) {
     event.preventDefault();
@@ -385,8 +551,74 @@ export function ForestIntelPage() {
     else await node.requestFullscreen();
   }
 
+  useEffect(() => {
+    if (!ignition) {
+      setScenario(null);
+      setScenarioMessage('No ignition is selected. The map shows screening and detections only. An ignition point is not invented.');
+      setPlaying(false);
+      return undefined;
+    }
+    if (!weatherReady || !weather) {
+      setScenarioMessage('Waiting for Open-Meteo before calculating a spread scenario.');
+      return undefined;
+    }
+    const latest = sensor.latest;
+    const fresh = sensorIsFresh(latest?.timestamp ?? null, Date.now());
+    const near = Boolean(
+      sensorPin &&
+        latest &&
+        fresh &&
+        distanceMeters(sensorPin.lat, sensorPin.lon, ignition.lat, ignition.lon, ignition.lat) <= 2000,
+    );
+    const alert = rawMqAlert(latest?.mq9_raw ?? null, latest?.mq135_raw ?? null);
+    const samples = weather.hourly.slice(0, forecastHours).map((hour, index) => ({
+      hour_offset: index,
+      wind_kmh: hour.windSpeedKmh,
+      wind_from_deg: hour.windDirectionDeg,
+      temperature_c: index === 0 && near && latest ? latest.temp_c : hour.temperatureC,
+      humidity_pct: index === 0 && near && latest ? latest.humidity_percent : hour.humidityPct,
+      precip_mm: hour.precipitationMm,
+      sensor_alert: index === 0 && near && alert,
+    }));
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void loadScenario(backendUrl, { ignition, forecastHours, samples })
+        .then((next) => {
+          if (cancelled) return;
+          setScenario(next);
+          setStepIndex(0);
+          setScenarioMessage(next.message || next.label);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          setScenario(null);
+          const text = error instanceof Error ? error.message : 'Spread request failed.';
+          const network = /failed to fetch|networkerror|load failed/i.test(text);
+          setScenarioMessage(
+            network
+              ? `The sensor API at ${backendUrl || 'the configured URL'} did not respond, so the spread scenario was not calculated.`
+              : text,
+          );
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [backendUrl, forecastHours, ignition, sensor.latest, sensorPin, weather, weatherReady]);
+
   const hourly = weatherReady && weather ? weather.hourly : [];
   const packet = sensor.latest;
+  const sensorFresh = sensorIsFresh(packet?.timestamp ?? null, Date.now());
+  const rainText = !rain
+    ? 'The 30-day rainfall sample has not loaded.'
+    : rain.error
+      ? rain.error
+      : rain.sumMm === null
+        ? 'Open-Meteo archive did not return a precipitation sum.'
+        : `${rain.sumMm.toFixed(1)} mm from ${rain.start} to ${rain.end} at ${rain.sampleLat.toFixed(2)}, ${rain.sampleLon.toFixed(2)}. ${rain.days} daily values. This is one regional sample.`;
+  const stepCount = scenario?.steps.length ?? 0;
+  const stepHour = activeStep?.hour ?? 0;
 
   return (
     <section
@@ -401,17 +633,25 @@ export function ForestIntelPage() {
       data-weather-status={weatherReady ? 'ready' : weatherStatus}
       data-weather-at={weatherReady && weather ? `${weather.sampleLat.toFixed(2)},${weather.sampleLon.toFixed(2)}` : ''}
       data-layer-hotspots={showHotspots ? 'on' : 'off'}
-      data-risk-cells={scored.length}
+      data-risk-cells={mapped.length}
+      data-spread-hour={stepHour}
+      data-model={MODEL_VERSION}
     >
       <header className="intel-toolbar">
         <div>
           <p className="kicker">Forest Intelligence</p>
-          <h1>Fire risk map</h1>
+          <h1>Tadoba Fire Intelligence</h1>
         </div>
         <label className="intel-field">
-          Monitoring area
-          <select value={areaName === TADOBA_LABEL ? 'tadoba' : 'custom'} onChange={(event) => choosePreset(event.target.value)}>
-            <option value="tadoba">{TADOBA_LABEL}</option>
+          Area
+          <select
+            value={areaName === 'Custom area' ? 'custom' : areaName === TADOBA_LABEL ? 'range' : 'outline'}
+            onChange={(event) => choosePreset(event.target.value)}
+          >
+            <option value="outline">Mapped reserve outline</option>
+            <option value="core">Core polygon</option>
+            <option value="buffer">Buffer polygon</option>
+            <option value="range">NTCA coordinate range</option>
             <option value="custom">Draw a custom area</option>
           </select>
         </label>
@@ -453,8 +693,8 @@ export function ForestIntelPage() {
         ) : null}
         <label className="intel-field">
           Forecast hours
-          <select value={forecastHours} onChange={(event) => setForecastHours(Number(event.target.value) as 6 | 12 | 24 | 48)}>
-            {[6, 12, 24, 48].map((hours) => (
+          <select value={forecastHours} onChange={(event) => setForecastHours(Number(event.target.value) as 6 | 12 | 24)}>
+            {[6, 12, 24].map((hours) => (
               <option key={hours} value={hours}>
                 Next {hours} hours
               </option>
@@ -470,6 +710,9 @@ export function ForestIntelPage() {
         <p className={`intel-status ${weatherStatus === 'error' ? 'error' : ''}`} data-weather-message>
           Weather: {weatherMessage}
         </p>
+        <p className={`intel-status ${sensor.link === 'Connected' ? '' : 'error'}`}>
+          Sensor: {sensor.link}{packet ? ` · ${sensorFresh ? 'fresh' : 'stale'} · ${packet.timestamp}` : ' · no packet'}
+        </p>
       </header>
       {places.length > 0 ? (
         <ul className="place-results">
@@ -484,7 +727,15 @@ export function ForestIntelPage() {
       ) : null}
       {searchError ? <p className="banner error">{searchError}</p> : null}
       <div className={sideOpen ? 'intel-body' : 'intel-body side-collapsed'}>
-        <div className={drawMode ? 'intel-map-wrap drawing' : 'intel-map-wrap'} ref={wrapRef}>
+        <div className={drawMode || pickMode !== 'none' ? 'intel-map-wrap drawing' : 'intel-map-wrap'} ref={wrapRef}>
+          <OpsBridge
+            backendUrl={backendUrl}
+            events={inference.status?.recent_events ?? EMPTY_EVENTS}
+            sensor={sensor.latest}
+            link={sensor.link}
+            nowMs={sensor.now}
+            sensorPin={sensorPin}
+          />
           <FireMap
             area={area}
             fitToken={fitToken}
@@ -494,13 +745,21 @@ export function ForestIntelPage() {
             hotspots={visibleHotspots}
             showHotspots={showHotspots}
             showFrp={showFrp && hasFrp}
-            cells={scored}
+            cells={built.truncated ? [] : mapped}
             showRisk={showRisk && !built.truncated}
+            showSensitive={showSensitive && !built.truncated}
+            showSpread={showSpread && !built.truncated}
+            spreadRing={showSpread ? (activeStep?.polygon ?? null) : null}
             riskOpacity={opacity}
             selectedCellId={selectedCell?.id ?? null}
             selectedHotspotKey={selection.hotspot ? hotspotIdentity(selection.hotspot) : null}
             wind={wind}
             showWind={showWind}
+            showGates={showGates}
+            showAreaBox={areaName !== 'Tadoba mapped outline'}
+            sensorPin={sensorPin}
+            cameraPin={cameraPin}
+            ignitionPin={ignition ? { lat: ignition.lat, lon: ignition.lon, label: ignition.kind === 'firms' ? 'Detection' : 'Hypothetical' } : null}
             drawMode={drawMode}
             drawAnchor={drawAnchor}
             readoutRef={readoutRef}
@@ -515,10 +774,20 @@ export function ForestIntelPage() {
           <div className="intel-map-tools">
             <button type="button" data-action="zoom-in" onClick={() => mapRef.current?.zoomIn()}>Zoom in</button>
             <button type="button" data-action="zoom-out" onClick={() => mapRef.current?.zoomOut()}>Zoom out</button>
-            <button type="button" data-action="reset-view" onClick={() => setFitToken((value) => value + 1)}>Reset view</button>
+            <button type="button" data-action="reset-view" onClick={() => { setFollow(false); setArea(TADOBA_MAP_BOUNDS); setAreaName('Tadoba mapped outline'); setFitToken((value) => value + 1); }}>Reset view</button>
+            <button type="button" data-action="zoom-tadoba" onClick={() => { setFollow(false); setArea(TADOBA_MAP_BOUNDS); setAreaName('Tadoba mapped outline'); setFitToken((value) => value + 1); }}>Zoom to Tadoba</button>
+            <button type="button" data-action="reset-tadoba" onClick={() => { setFollow(false); setArea(TADOBA_MAP_BOUNDS); setAreaName('Tadoba mapped outline'); setFitToken((value) => value + 1); }}>Reset to Tadoba</button>
+            <button type="button" data-action="zoom-incident" onClick={() => {
+              const destination = getOpsDocument().mission?.destination;
+              setFollow(false);
+              if (!destination || !mapRef.current) return;
+              mapRef.current.flyTo([destination.lat, destination.lon], 14, { duration: 0.5 });
+            }}>Zoom to incident</button>
             <button type="button" data-action="fullscreen" onClick={() => void toggleFullscreen()}>Full screen</button>
           </div>
           <div className="intel-north" title="This map stays north-up.">N</div>
+          <OpsStatus />
+          <ArrivalCard />
           <span className="intel-readout" data-coord-readout ref={readoutRef}>
             Move the pointer over the map
           </span>
@@ -529,10 +798,21 @@ export function ForestIntelPage() {
             </p>
           ) : null}
           {drawMessage ? <p className="intel-banner">{drawMessage}</p> : null}
-          <p className="intel-aoi-note">Dashed rectangle: {areaName}. Default Tadoba extent is the published location range, not a surveyed boundary and not a sensor layout.</p>
+          <p className="intel-aoi-note">{TADOBA_BOUNDARY_NOTE}</p>
         </div>
         {sideOpen ? (
           <aside className="intel-side">
+            <DroneOpsPanel
+              pickLaunch={pickMode === 'launch'}
+              onPickLaunch={() => setPickMode(pickMode === 'launch' ? 'none' : 'launch')}
+              onZoomIncident={() => {
+                const destination = getOpsDocument().mission?.destination;
+                setFollow(false);
+                if (!destination || !mapRef.current) return;
+                mapRef.current.flyTo([destination.lat, destination.lon], 14, { duration: 0.5 });
+              }}
+              onResetTadoba={() => { setFollow(false); setArea(TADOBA_MAP_BOUNDS); setAreaName('Tadoba mapped outline'); setFitToken((value) => value + 1); }}
+            />
             <button className="button secondary" type="button" data-action="toggle-side" onClick={() => setSideOpen(false)}>
               Hide panel
             </button>
@@ -578,7 +858,8 @@ export function ForestIntelPage() {
               ) : (
                 <p className="layer-note">{weatherMessage}</p>
               )}
-              <h3>Risk score</h3>
+              <h3>Current fire risk</h3>
+              <p className="layer-note">This score is separate from sensitivity, from satellite detections, and from the spread scenario.</p>
               {selectedCell?.risk.score !== null && selectedCell ? (
                 <ul className="detail-list">
                   <li>{selectedCell.risk.score} / 100 · {selectedCell.risk.band} · range {selectedCell.risk.range}</li>
@@ -591,14 +872,66 @@ export function ForestIntelPage() {
               ) : (
                 <p className="layer-note">{built.truncated ? 'The risk grid is not drawn at this cell size and zoom.' : 'This location has no scored cell yet. A cell stays blank when both weather and FIRMS are unavailable.'}</p>
               )}
-              <p className="layer-note">Vegetation, fuel, slope, and aspect are not connected, so they are not inputs. The receiver packet below is real telemetry and is not placed on the map.</p>
-              {packet ? (
-                <p className="layer-note">
-                  Latest unlocated packet {packet.timestamp}: {packet.temp_c.toFixed(1)} °C, {packet.humidity_percent.toFixed(0)}% humidity, MQ135 {packet.mq135_raw}, MQ9 {packet.mq9_raw}. Current packets have no latitude or longitude.
-                </p>
+              <h3>Environmental sensitivity</h3>
+              {selectedCell?.sensitivity ? (
+                <ul className="detail-list">
+                  <li>{selectedCell.sensitivity.score === null ? 'Not scored' : `${selectedCell.sensitivity.score} / 100 · ${selectedCell.sensitivity.band}`} · confidence {Math.round(selectedCell.sensitivity.confidence * 100)}%</li>
+                  <li>Model {selectedCell.sensitivity.modelVersion}. {selectedCell.sensitivity.uncertainty}</li>
+                  {selectedCell.sensitivity.factors.map((factor) => (
+                    <li key={factor.name}>{factor.name}: {factor.reading} · {factor.points === null ? 'not scored' : `${factor.points.toFixed(1)} points`}. {factor.note}</li>
+                  ))}
+                </ul>
               ) : (
-                <p className="layer-note">No receiver packet is loaded. Sensor pins stay off because the packets have no coordinates.</p>
+                <p className="layer-note">No cell is selected.</p>
               )}
+              <h3>30-day rain</h3>
+              <p className="layer-note">{rainText}</p>
+              <h3>Sensor board</h3>
+              {packet ? (
+                <ul className="detail-list">
+                  <li>{sensorFresh ? 'Fresh' : 'Stale or the timestamp could not be read'} · {packet.timestamp}</li>
+                  <li>Temperature {packet.temp_c.toFixed(1)} °C · humidity {packet.humidity_percent.toFixed(0)}%</li>
+                  <li>MQ135 {packet.mq135_raw} raw · MQ9 {packet.mq9_raw} raw. These are not calibrated concentrations.</li>
+                  <li>Gas state {sensor.gasAlarm?.state ?? 'not reported'}. Alarm when both raw values are strictly above 750 at the same time.</li>
+                  <li>{sensorPin ? `Configured location ${formatCoord(sensorPin.lat, sensorPin.lon)}. Only the cell containing this point uses the packet.` : 'No sensor location is configured, so this packet is not assigned to a cell.'}</li>
+                </ul>
+              ) : (
+                <p className="layer-note">No receiver packet is loaded. A missing packet is not placed on the map and is not treated as a normal reading.</p>
+              )}
+              <div className="basemap-row">
+                <button type="button" className={pickMode === 'sensor' ? 'chip on' : 'chip'} onClick={() => setPickMode('sensor')}>Place sensor</button>
+                <button type="button" className="chip" onClick={() => { setSensorPin(null); savePin('wildcraft.sensorPin', null); }}>Clear sensor</button>
+              </div>
+              {sensorLog.length > 0 ? (
+                <ul className="detail-list">
+                  {sensorLog.map((row) => (
+                    <li key={`${row.at}-${row.text}`}>{row.at}: {row.text}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <h3>Spread scenario</h3>
+              <p className="layer-note">{SPREAD_LABEL} {scenarioMessage}</p>
+              <p className="layer-note">Animation time: {activeStep ? `+${stepHour} h` : 'no step'}. {activeStep?.notes[0] ?? 'Select an ignition to calculate steps.'}</p>
+              {activeStep?.bearingDeg !== null && activeStep?.bearingDeg !== undefined ? (
+                <p className="layer-note">Downwind bearing {activeStep.bearingDeg.toFixed(0)}°. Rate {activeStep.rateKmh ?? 'unavailable'} km/h. Downwind {activeStep.downwindKm ?? 'unavailable'} km, crosswind {activeStep.crosswindKm ?? 'unavailable'} km. Confidence {activeStep.confidence ?? 'unavailable'}.</p>
+              ) : null}
+              <div className="basemap-row">
+                <button type="button" className={pickMode === 'ignition' ? 'chip on' : 'chip'} onClick={() => setPickMode('ignition')}>Set hypothetical ignition</button>
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={() => {
+                    if (!selection.hotspot) return;
+                    setIgnition({ lat: selection.hotspot.latitude, lon: selection.hotspot.longitude, kind: 'firms' });
+                    setStepIndex(0);
+                  }}
+                >
+                  Use selected detection
+                </button>
+                <button type="button" className="chip" onClick={() => { setIgnition(null); setPlaying(false); setStepIndex(0); }}>Clear ignition</button>
+              </div>
+              <h3>Headquarters</h3>
+              <p className="layer-note">{TADOBA_HEADQUARTERS.name}. Headquarters name: {TADOBA_HEADQUARTERS.headquartersName}. Coordinates: unconfigured. {TADOBA_HEADQUARTERS.note} Source: {TADOBA_HEADQUARTERS.source}</p>
             </section>
             <section>
               <h2>Layers</h2>
@@ -633,7 +966,10 @@ export function ForestIntelPage() {
               <p className="layer-note">{observationNote(firmsWindow, firmsDays)} {firms?.note ?? ''}</p>
               <label className="intel-check"><input type="checkbox" checked={showFrp} onChange={(event) => setShowFrp(event.target.checked)} /> Fire radiative power labels</label>
               <p className="layer-note">{hasFrp ? 'FRP text is drawn from zoom 11, up to 80 labels in view. It is the FIRMS value in MW.' : 'No FRP values are in the current FIRMS response, so no FRP labels are drawn.'}</p>
-              <label className="intel-check"><input type="checkbox" checked={showRisk} onChange={(event) => setShowRisk(event.target.checked)} /> Model fire-risk grid</label>
+              <label className="intel-check"><input type="checkbox" checked={showRisk} onChange={(event) => setShowRisk(event.target.checked)} /> Current fire-risk grid</label>
+              <label className="intel-check"><input type="checkbox" checked={showSensitive} onChange={(event) => setShowSensitive(event.target.checked)} /> Sensitive zones</label>
+              <label className="intel-check"><input type="checkbox" checked={showSpread} onChange={(event) => setShowSpread(event.target.checked)} /> Illustrative spread</label>
+              <label className="intel-check"><input type="checkbox" checked={showGates} onChange={(event) => setShowGates(event.target.checked)} /> OSM gates</label>
               <div className="basemap-row">
                 {CELL_SIZES.map((size) => (
                   <button key={size} type="button" className={cellMeters === size ? 'chip on' : 'chip'} onClick={() => setCellMeters(size)}>{size} m</button>
@@ -646,12 +982,12 @@ export function ForestIntelPage() {
               <label className="intel-check"><input type="checkbox" checked={showWeather} onChange={(event) => setShowWeather(event.target.checked)} /> Weather charts</label>
               <label className="intel-check"><input type="checkbox" checked={showWind} onChange={(event) => setShowWind(event.target.checked)} /> Wind arrow</label>
               <p className="layer-note">The arrow is one Open-Meteo sample. It points downwind from the reported direction. It is not a wind field.</p>
-              <h3>Not configured</h3>
-              <p className="layer-note">Vegetation health / NDVI: no satellite vegetation product is connected.</p>
-              <p className="layer-note">Vegetation dryness: no fuel-moisture product is connected. Soil moisture stays in the weather sample.</p>
-              <p className="layer-note">Terrain elevation, slope, and aspect: no DEM is connected.</p>
+              <h3>Not connected</h3>
+              <p className="layer-note">{DATASET_STATUS.vegetation}</p>
+              <p className="layer-note">{DATASET_STATUS.terrain}</p>
+              <p className="layer-note">{DATASET_STATUS.landCover} Fuel availability is not shown as a measurement.</p>
               <h3>Camera model detections</h3>
-              <p className="layer-note">These rows come from the local webcam model. They have no GPS coordinates and are not drawn on the map. A model detection is not a confirmed fire. A webcam image does not provide the ground position of an object in view.</p>
+              <p className="layer-note">Smoke is kept at confidence 0.40 or higher and fire at 0.20 or higher. A model detection is not a FIRMS hotspot and not a confirmed fire. The estimated box position from the camera is not plotted.</p>
               {(inference.status?.recent_events.length ?? 0) === 0 ? (
                 <p className="layer-note">No camera detection is in the latest inference status.</p>
               ) : (
@@ -663,9 +999,12 @@ export function ForestIntelPage() {
                   ))}
                 </ul>
               )}
-              <p className="layer-note">No webcam location is configured, so the camera is not placed on the map.</p>
-              <p className="layer-note">Wildcraft sensors: packets have no coordinates, so no sensor layer is drawn.</p>
-              <p className="layer-note">Drone path: the simulator uses a local meter frame and does not publish geographic coordinates.</p>
+              <p className="layer-note">{cameraPin ? `Camera marker ${formatCoord(cameraPin.lat, cameraPin.lon)}. Detections stay associated with the camera, not with a ground-fire coordinate. A smoke plume is not the fire's ground position.` : 'No camera location is configured, so detections stay off the map.'}</p>
+              <div className="basemap-row">
+                <button type="button" className={pickMode === 'camera' ? 'chip on' : 'chip'} onClick={() => setPickMode('camera')}>Place camera</button>
+                <button type="button" className="chip" onClick={() => { setCameraPin(null); savePin('wildcraft.cameraPin', null); }}>Clear camera</button>
+              </div>
+              <p className="layer-note">The geographic drone on this map is a straight-line simulation. The 3D simulator stays in its own local practice scene and is not this flight. Camera detections are not ground coordinates.</p>
               <p className="layer-note">Landsat NRT is not requested. NASA limits that FIRMS product to the United States and Canada.</p>
             </section>
             <section data-legend>
@@ -673,13 +1012,18 @@ export function ForestIntelPage() {
               <p><i className="swatch" style={{ background: '#c4473a' }} /> FIRMS confidence high, or 80–100</p>
               <p><i className="swatch" style={{ background: '#e08a2c' }} /> FIRMS confidence nominal, or 50–79</p>
               <p><i className="swatch" style={{ background: '#d6c24a' }} /> FIRMS confidence low, or below 50</p>
-              <p><i className="swatch" style={{ background: '#2f7d46' }} /> Risk 0–24 Low</p>
-              <p><i className="swatch" style={{ background: '#d6c24a' }} /> Risk 25–49 Moderate</p>
-              <p><i className="swatch" style={{ background: '#e08a2c' }} /> Risk 50–74 High</p>
-              <p><i className="swatch" style={{ background: '#c4473a' }} /> Risk 75–100 Very high</p>
-              <p className="layer-note">Hotspot colors are detection confidence. Cell colors are the model score. The grid is a model visualization. It does not show burned area or a confirmed fire perimeter.</p>
+              <p><i className="swatch" style={{ background: '#2f7d46' }} /> Lower sensitivity or low risk, 0–24</p>
+              <p><i className="swatch" style={{ background: '#d6c24a' }} /> Moderate, 25–49</p>
+              <p><i className="swatch" style={{ background: '#e08a2c' }} /> High, 50–74</p>
+              <p><i className="swatch" style={{ background: '#c4473a' }} /> Very high, 75–100</p>
+              <p className="layer-note">When both cell layers are on, the outer color is sensitivity and the inner color is current fire risk. Hollow hotspot rings are inside the FIRMS request box and outside the mapped outline. The spread tint is the model zone clipped to drawn cells. {SPREAD_LABEL}</p>
+              <p><i className="swatch" style={{ background: '#8d2b22' }} /> Real LoRa node, location set on this map</p>
+              <p><i className="swatch" style={{ background: '#8a6a22' }} /> Simulated demonstration node</p>
+              <p><i className="swatch" style={{ background: '#143d6b' }} /> Simulated drone and straight-line route</p>
+              <p><i className="swatch" style={{ background: '#1d4e89' }} /> Configured launch point</p>
               <p className="layer-note">Each weather factor contributes at most 15 points. A nearby detection adds 8, 18, 30, or 40. The total is capped at 100.</p>
-              <p className="layer-note">Source: NASA FIRMS area API, https://firms.modaps.eosdis.nasa.gov/api/area/ · Open-Meteo, https://open-meteo.com/en/docs</p>
+              <p className="layer-note">Network: this desktop uses the sensor URL in Settings, usually http://127.0.0.1:8000. Other devices on this Wi-Fi can use http://10.241.226.2:8000 until DHCP changes the laptop address. Update EXPO_PUBLIC_SENSOR_API_BASE and LAN_API_BASE, then restart Expo with npx expo start -c. Do not port-forward port 8000. That address is not a forest coordinate.</p>
+              <p className="layer-note">Source: NASA FIRMS area API, {DATASET_STATUS.firms} · Open-Meteo, {DATASET_STATUS.weather}</p>
               <p className="layer-note">Grid: local equirectangular meters at latitude {center.lat.toFixed(2)}°, aligned to longitude 0 and latitude 0. Basemap is Web Mercator.</p>
             </section>
             <form className="intel-coords" onSubmit={applyCoordinates}>
@@ -701,6 +1045,32 @@ export function ForestIntelPage() {
           </button>
         )}
       </div>
+      <section className="intel-timeline" data-spread-controls>
+        <button type="button" data-action="spread-play" onClick={() => setPlaying((value) => !value)} disabled={stepCount < 2}>
+          {playing ? 'Pause' : 'Play'}
+        </button>
+        <button type="button" data-action="spread-restart" onClick={() => { setStepIndex(0); setPlaying(false); }} disabled={stepCount === 0}>
+          Restart
+        </button>
+        <label className="intel-field">
+          Forecast step
+          <input
+            type="range"
+            min={0}
+            max={Math.max(0, stepCount - 1)}
+            step={1}
+            value={Math.min(stepIndex, Math.max(0, stepCount - 1))}
+            disabled={stepCount === 0}
+            onChange={(event) => {
+              setPlaying(false);
+              setStepIndex(Number(event.target.value));
+            }}
+          />
+        </label>
+        <p className="intel-status">
+          {stepCount === 0 ? 'No spread steps' : `+${stepHour} h of ${scenario?.steps[stepCount - 1]?.hour ?? 0} h`} · {SPREAD_LABEL}
+        </p>
+      </section>
       <section className={chartsOpen ? 'intel-bottom' : 'intel-bottom collapsed'}>
         <button className="button secondary" type="button" onClick={() => setChartsOpen((open) => !open)}>
           {chartsOpen ? 'Hide forecast charts' : 'Show forecast charts'}
@@ -709,6 +1079,11 @@ export function ForestIntelPage() {
           <>
             <p className="layer-note">Hourly values are the next {forecastHours} forecast hours. Daily rows are the Open-Meteo daily forecast. Neither series is FIRMS history.</p>
             <div className="chart-row">
+              <TrendChart
+                title="FIRMS detections by day"
+                unit="count"
+                points={dates.map((day) => ({ at: day, value: visibleHotspots.filter((hotspot) => (hotspot.acqDate ?? 'Undated') === day).length }))}
+              />
               <TrendChart title="Temperature" unit="°C" points={hourly.map((hour) => ({ at: hour.time, value: hour.temperatureC ?? Number.NaN }))} />
               <TrendChart title="Humidity" unit="%" points={hourly.map((hour) => ({ at: hour.time, value: hour.humidityPct ?? Number.NaN }))} />
               <TrendChart title="Wind speed" unit="km/h" points={hourly.map((hour) => ({ at: hour.time, value: hour.windSpeedKmh ?? Number.NaN }))} />

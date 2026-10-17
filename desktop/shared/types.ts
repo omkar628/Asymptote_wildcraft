@@ -42,6 +42,36 @@ export type LaptopThresholds = {
   rssi_dbm_low: number | null;
 };
 
+export type GasAlarmState =
+  | 'NORMAL'
+  | 'ALARM_ACTIVE'
+  | 'ACKNOWLEDGED'
+  | 'SENSOR_DATA_STALE'
+  | 'INCOMPLETE';
+
+export type GasSensorName = 'mq9' | 'mq135';
+
+export type GasReadingStatus = 'valid' | 'incomplete' | 'stale' | 'missing';
+
+export type GasAlarm = {
+  state: GasAlarmState;
+  activation_threshold: number;
+  recovery_threshold: number;
+  units: 'raw';
+  mq9_raw: number | null;
+  mq135_raw: number | null;
+  mq9_above: boolean;
+  mq135_above: boolean;
+  triggered_sensors: GasSensorName[];
+  event_id: string | null;
+  started_at: string | null;
+  acknowledged_at: string | null;
+  reading_status: GasReadingStatus;
+  safe_to_treat_as_normal: boolean;
+  detail: string;
+  link_down: boolean;
+};
+
 export type SensorStatus = {
   api: 'running';
   serial: SerialStatus;
@@ -49,6 +79,7 @@ export type SensorStatus = {
   storedReadings: number;
   thresholds: LaptopThresholds;
   preliminaryAlerts: PreliminaryAlert[];
+  gasAlarm?: GasAlarm | null;
 };
 
 export type CameraSource = 'webcam' | 'stream';

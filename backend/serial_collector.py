@@ -387,15 +387,31 @@ class SerialCollector(threading.Thread):
         self.baud_rate = baud_rate
         self._on_reading = on_reading
         self._on_status = on_status
-        self._stop = threading.Event()
+        # Named _stop_event so it does not replace threading.Thread._stop().
+        # join() calls that method, and an Event in its place raises TypeError.
+        self._stop_event = threading.Event()
+        self._serial_lock = threading.Lock()
+        self._serial = None
 
     def stop(self) -> None:
-        self._stop.set()
-        self.join(timeout=5)
+        self._stop_event.set()
+        self._close_serial()
+        if threading.current_thread() is not self:
+            self.join(timeout=5)
+
+    def _close_serial(self) -> None:
+        with self._serial_lock:
+            handle = self._serial
+            self._serial = None
+        if handle is None:
+            return
+        try:
+            handle.close()
+        except Exception:
+            log_line("[sensor] Could not close the serial port during shutdown.")
 
     def run(self) -> None:
         try:
-            import serial
             from serial import SerialException
         except ImportError:
             self._on_status("disconnected", False, "pyserial is not installed")
@@ -403,27 +419,36 @@ class SerialCollector(threading.Thread):
             return
 
         reported_error: str | None = None
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             self._on_status("connecting", False, None)
             try:
                 # DTR/RTS stay off. The NodeMCU reset circuit uses those lines, and
                 # the default open pulse restarts a receiver that is already running.
                 with open_receiver_port(self.port, self.baud_rate) as handle:
-                    self._on_status("connected", True, None)
-                    reported_error = None
-                    assembler = PacketAssembler()
-                    while not self._stop.is_set():
-                        raw = handle.readline()
-                        if not raw:
-                            continue
-                        text = raw.decode("utf-8", errors="replace").replace("\r", "\n")
-                        for line in text.split("\n"):
-                            for reading in assembler.feed(line):
-                                try:
-                                    self._on_reading(reading)
-                                except Exception as exc:
-                                    log_line(f"[sensor] Could not store a reading: {exc}")
+                    with self._serial_lock:
+                        self._serial = handle
+                    try:
+                        self._on_status("connected", True, None)
+                        reported_error = None
+                        assembler = PacketAssembler()
+                        while not self._stop_event.is_set():
+                            raw = handle.readline()
+                            if not raw:
+                                continue
+                            text = raw.decode("utf-8", errors="replace").replace("\r", "\n")
+                            for line in text.split("\n"):
+                                for reading in assembler.feed(line):
+                                    try:
+                                        self._on_reading(reading)
+                                    except Exception as exc:
+                                        log_line(f"[sensor] Could not store a reading: {exc}")
+                    finally:
+                        with self._serial_lock:
+                            if self._serial is handle:
+                                self._serial = None
             except (SerialException, OSError) as exc:
+                if self._stop_event.is_set():
+                    break
                 self._on_status("reconnecting", False, str(exc))
                 message = str(exc)
                 if message != reported_error:
@@ -432,14 +457,17 @@ class SerialCollector(threading.Thread):
                         "Close any other program using this port."
                     )
                     reported_error = message
-                if self._stop.wait(2):
+                if self._stop_event.wait(2):
                     break
             except Exception as exc:
+                if self._stop_event.is_set():
+                    break
                 self._on_status("reconnecting", False, str(exc))
                 message = str(exc)
                 if message != reported_error:
                     log_line(f"[sensor] Serial collector error: {exc}")
                     reported_error = message
-                if self._stop.wait(2):
+                if self._stop_event.wait(2):
                     break
+        self._close_serial()
         self._on_status("disconnected", False, None)

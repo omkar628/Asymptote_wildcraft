@@ -1,5 +1,7 @@
 import type { DashboardLinkState, SocketPhase } from '@/types/liveSensor';
 
+import { LAN_API_BASE } from '@/services/sensors/apiBase';
+
 export {
   EMULATOR_API_BASE,
   LAN_API_BASE,
@@ -13,6 +15,7 @@ export {
   resolveApiBase,
   timedOutApiMessage,
   unreachableApiMessage,
+  websocketFailedMessage,
   websocketUrlFromBase,
 } from '@/services/sensors/apiBase';
 export type { ApiRuntime } from '@/services/sensors/apiBase';
@@ -26,7 +29,7 @@ export const API_TIMEOUT_MS = 8000;
 export const STORAGE_KEY_BASE = 'tadoba.sensorApiBase';
 export const STORAGE_KEY_THRESHOLDS = 'tadoba.sensorPhoneThresholds';
 /** Physical-phone default when EXPO_PUBLIC_SENSOR_API_BASE is absent. */
-export const DEFAULT_API_BASE = 'http://10.241.226.2:8000';
+export const DEFAULT_API_BASE = LAN_API_BASE;
 
 export function bundledApiBase(): string {
   const value = process.env.EXPO_PUBLIC_SENSOR_API_BASE;

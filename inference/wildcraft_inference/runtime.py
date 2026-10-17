@@ -25,6 +25,10 @@ from wildcraft_inference.detector import (
 from wildcraft_inference.store import MemoryDetectionLog
 from wildcraft_inference.webcam import choose_preferred, discover_cameras
 
+# The window refreshes at 30 FPS. The model runs at 4 FPS, inside the 3–5 FPS band.
+DISPLAY_PERIOD_S = 1.0 / 30.0
+INFERENCE_PERIOD_S = 0.25
+
 
 class InferenceRuntime:
     def __init__(self, settings: Settings) -> None:
@@ -44,6 +48,7 @@ class InferenceRuntime:
         self._load_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._display_thread: threading.Thread | None = None
         self._loading = False
         self._running = False
         self._jpeg: bytes | None = None
@@ -78,8 +83,10 @@ class InferenceRuntime:
             return
         self._stop.clear()
         self._running = True
-        self._thread = threading.Thread(target=self._loop, name="wildcraft-infer", daemon=True)
+        self._thread = threading.Thread(target=self._infer_loop, name="wildcraft-infer", daemon=True)
+        self._display_thread = threading.Thread(target=self._display_loop, name="wildcraft-display", daemon=True)
         self._thread.start()
+        self._display_thread.start()
         threading.Thread(target=self._load_model, name="wildcraft-model", daemon=True).start()
         if self._pending_webcam:
             info = self._pending_webcam
@@ -105,10 +112,11 @@ class InferenceRuntime:
     def stop(self) -> None:
         self._stop.set()
         self.camera.stop()
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2)
+        for thread in (self._thread, self._display_thread):
+            if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=2)
         self._thread = None
+        self._display_thread = None
         self._running = False
         close_window()
         with self._lock:
@@ -309,65 +317,85 @@ class InferenceRuntime:
         _log_model_status(self.model_path, status)
         self.publish({"type": "status", "status": self.status()})
 
-    def _loop(self) -> None:
+    def _infer_loop(self) -> None:
+        """Run YOLO a few times a second and cache the boxes for the display loop."""
+
+        last_infer = 0.0
         last_publish = 0.0
+        while not self._stop.is_set():
+            now = time.time()
+            if not self._detection_enabled or not self.detector.status().loaded:
+                if now - last_publish >= 1.0:
+                    self.publish({"type": "status", "status": self.status()})
+                    last_publish = now
+                self._stop.wait(0.05)
+                continue
+            if now - last_infer < INFERENCE_PERIOD_S:
+                self._stop.wait(min(0.01, INFERENCE_PERIOD_S - (now - last_infer)))
+                continue
+            frame = self._next_frame()
+            if frame is None:
+                if now - self._last_wait_log >= 5.0 and self.camera.snapshot()["state"] != "idle":
+                    self._last_wait_log = now
+                    print("[wildcraft] Waiting for a camera frame.", flush=True)
+                if now - last_publish >= 1.0:
+                    self.publish({"type": "status", "status": self.status()})
+                    last_publish = now
+                self._stop.wait(0.05)
+                continue
+            last_infer = time.time()
+            frame = frame.copy()
+            height, width = frame.shape[:2]
+            infer_started = time.perf_counter()
+            boxes, error = self.detector.infer(frame, self.confidence)
+            duration_ms = (time.perf_counter() - infer_started) * 1000.0
+            self._log_inference(int(width), int(height), duration_ms, boxes, error)
+            with self._lock:
+                self._boxes = boxes
+                self._processed += 1
+                self._last_inference_at = _local_timestamp()
+                self._last_error = error
+                self._frame_width = int(width)
+                self._frame_height = int(height)
+                self._last_duration_ms = round(duration_ms, 1)
+                self._times.append(time.monotonic())
+                self._fps = _fps(self._times)
+            self.publish({"type": "status", "status": self.status()})
+            last_publish = time.time()
+
+    def _display_loop(self) -> None:
+        """Show the newest camera frame at 30 FPS, with the last detection still drawn."""
+
+        last_jpeg = 0.0
         try:
             while not self._stop.is_set():
+                tick = time.time()
                 frame = self._next_frame()
-                now = time.monotonic()
                 if frame is None:
-                    if now - self._last_wait_log >= 5.0 and self.camera.snapshot()["state"] != "idle":
-                        self._last_wait_log = now
-                        print("[wildcraft] Waiting for a camera frame.", flush=True)
-                    if now - last_publish >= 1.0:
-                        self.publish({"type": "status", "status": self.status()})
-                        last_publish = now
-                    self._stop.wait(0.05)
+                    self._stop.wait(0.03)
                     continue
-                height, width = frame.shape[:2]
-                ran_infer = False
-                boxes: list = []
-                error = None
-                duration_ms = 0.0
-                if self._detection_enabled and self.detector.status().loaded:
-                    infer_started = time.perf_counter()
-                    boxes, error = self.detector.infer(frame, self.confidence)
-                    duration_ms = (time.perf_counter() - infer_started) * 1000.0
-                    self._log_inference(int(width), int(height), duration_ms, boxes, error)
-                    ran_infer = True
+                frame = frame.copy()
+                with self._lock:
+                    boxes = list(self._boxes)
                 try:
-                    image = draw_boxes(frame, boxes) if boxes else frame.copy()
+                    image = draw_boxes(frame, boxes) if boxes else frame
                 except Exception as exc:
                     self._mark_error(f"Could not draw detections: {exc}")
+                    self._stop.wait(0.05)
                     continue
                 window_error = show_frame(image)
-                encoded = encode_jpeg(image)
-                if encoded is None:
-                    self._mark_error("Could not encode the camera frame.")
-                    continue
-                timestamp = _local_timestamp()
-                with self._lock:
-                    self._jpeg = encoded
-                    if ran_infer or not self._detection_enabled:
-                        self._boxes = boxes
-                    if ran_infer:
-                        self._processed += 1
-                        self._last_inference_at = timestamp
-                        self._last_error = window_error or error
-                        self._frame_width = int(width)
-                        self._frame_height = int(height)
-                        self._last_duration_ms = round(duration_ms, 1)
-                        self._times.append(time.monotonic())
-                        self._fps = _fps(self._times)
-                    elif window_error:
-                        self._last_error = window_error
-                    elif not self._detection_enabled:
-                        self._last_error = None
-                if ran_infer or now - last_publish >= 1.0:
-                    self.publish({"type": "status", "status": self.status()})
-                    last_publish = time.monotonic()
-                if not ran_infer:
-                    self._stop.wait(0.05)
+                if window_error:
+                    self._mark_error(window_error)
+                now = time.time()
+                if now - last_jpeg >= 0.1:
+                    encoded = encode_jpeg(image)
+                    if encoded is not None:
+                        with self._lock:
+                            self._jpeg = encoded
+                    last_jpeg = now
+                remain = DISPLAY_PERIOD_S - (time.time() - tick)
+                if remain > 0:
+                    self._stop.wait(remain)
         finally:
             close_window()
 
@@ -414,7 +442,7 @@ class InferenceRuntime:
         names = ", ".join(sorted({box.class_name for box in boxes})) or "none"
         print(
             f"[wildcraft] Frame {width}x{height} inference {duration_ms:.0f} ms "
-            f"detections {len(boxes)} [{names}] smoke>{SMOKE_CONFIDENCE:.2f} fire>{FIRE_CONFIDENCE:.2f}",
+            f"detections {len(boxes)} [{names}] smoke>={SMOKE_CONFIDENCE:.2f} fire>={FIRE_CONFIDENCE:.2f}",
             flush=True,
         )
 

@@ -45,6 +45,9 @@ export type FirmsSourceStatus = {
   configured: boolean;
   products: Array<{ id: string; label: string }>;
   documentation: string;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
 };
 
 const CACHE_MS = 10 * 60 * 1000;
@@ -127,43 +130,58 @@ function parsePayload(value: unknown): FirmsPayload {
   };
 }
 
-export function firmsErrorMessage(error: unknown): { status: 'error' | 'unconfigured'; message: string } {
+export function firmsErrorMessage(
+  error: unknown,
+  baseUrl = '',
+  lastSuccessAt: string | null = null,
+): { status: 'error' | 'unconfigured'; message: string } {
   const text = error instanceof Error ? error.message : 'NASA FIRMS request failed.';
+  const last = lastSuccessAt ? ` Last successful retrieval: ${lastSuccessAt}.` : ' No successful retrieval is stored yet.';
   if (text.toLowerCase().includes('not configured')) {
     return { status: 'unconfigured', message: text };
+  }
+  if (/failed to fetch|networkerror|network error|load failed/i.test(text)) {
+    const target = baseUrl || 'the sensor API';
+    return {
+      status: 'error',
+      message: `The sensor API at ${target} did not respond, so NASA FIRMS was not contacted. Check that one backend is running and that Windows Firewall allows inbound TCP 8000 for that Python process. Do not port-forward the service.${last}`,
+    };
   }
   if (text.includes('404')) {
     return {
       status: 'error',
-      message: 'The running sensor API has no FIRMS route. Restart that one backend process, then refresh.',
+      message: `The running sensor API has no FIRMS route. Restart that one backend process, then refresh.${last}`,
     };
   }
-  return { status: 'error', message: text };
+  return { status: 'error', message: `${text}${last}` };
 }
 
-export async function loadFirmsStatus(base: string): Promise<FirmsSourceStatus | null> {
-  if (!base) return null;
-  try {
-    const body = await requestJson(apiUrl(base, '/api/firms/status'), 15000);
-    const row = asRecord(body);
-    if (!row) return null;
-    const products = Array.isArray(row.products)
-      ? row.products
-          .map((item) => {
-            const record = asRecord(item);
-            if (!record || typeof record.id !== 'string' || typeof record.label !== 'string') return null;
-            return { id: record.id, label: record.label };
-          })
-          .filter((item): item is { id: string; label: string } => item !== null)
-      : [];
-    return {
-      configured: row.configured === true,
-      products,
-      documentation: asText(row.documentation) ?? 'https://firms.modaps.eosdis.nasa.gov/api/area/',
-    };
-  } catch {
-    return null;
+export async function loadFirmsStatus(base: string): Promise<FirmsSourceStatus> {
+  if (!base) {
+    throw new HttpError('Set the sensor backend URL in Settings before requesting FIRMS.');
   }
+  const body = await requestJson(apiUrl(base, '/api/firms/status'), 15000);
+  const row = asRecord(body);
+  if (!row) {
+    throw new HttpError('The sensor API did not return a FIRMS status.');
+  }
+  const products = Array.isArray(row.products)
+    ? row.products
+        .map((item) => {
+          const record = asRecord(item);
+          if (!record || typeof record.id !== 'string' || typeof record.label !== 'string') return null;
+          return { id: record.id, label: record.label };
+        })
+        .filter((item): item is { id: string; label: string } => item !== null)
+    : [];
+  return {
+    configured: row.configured === true,
+    products,
+    documentation: asText(row.documentation) ?? 'https://firms.modaps.eosdis.nasa.gov/api/area/',
+    lastSuccessAt: asText(row.last_success_at),
+    lastError: asText(row.last_error),
+    lastErrorAt: asText(row.last_error_at),
+  };
 }
 
 export async function loadHotspots(base: string, query: FirmsQuery, refresh = false): Promise<FirmsPayload> {

@@ -53,13 +53,20 @@ class DetectorTests(unittest.TestCase):
 
 class ClassThresholdTests(unittest.TestCase):
     def test_smoke_and_fire_use_separate_gates(self) -> None:
-        from wildcraft_inference.detector import keeps_class
+        from wildcraft_inference.detector import box_label, keeps_class, model_confidence
 
-        self.assertFalse(keeps_class("smoke", 0.50))
-        self.assertTrue(keeps_class("smoke", 0.51))
-        self.assertFalse(keeps_class("fire", 0.20))
-        self.assertTrue(keeps_class("fire", 0.21))
+        self.assertFalse(keeps_class("smoke", 0.39))
+        self.assertTrue(keeps_class("smoke", 0.40))
+        self.assertFalse(keeps_class("fire", 0.19))
+        self.assertTrue(keeps_class("fire", 0.20))
+        self.assertTrue(keeps_class("fire", 0.35))
         self.assertFalse(keeps_class("person", 0.99))
+        self.assertEqual(box_label("fire", 0.20), "fire 20%")
+        self.assertEqual(box_label("fire", 0.35), "fire 35%")
+        self.assertEqual(box_label("smoke", 0.40), "smoke 0.40")
+        self.assertEqual(model_confidence(0.35), 0.20)
+        self.assertEqual(model_confidence(0.24), 0.20)
+        self.assertEqual(model_confidence(0.10), 0.10)
 
     def test_box_area_maps_to_distance_and_a_dummy_offset(self) -> None:
         from wildcraft_inference.detector import CAMERA_LAT, CAMERA_LON, annotate_detection, estimate_distance_m
@@ -78,6 +85,14 @@ class ClassThresholdTests(unittest.TestCase):
         self.assertAlmostEqual(near.estimated_lon, CAMERA_LON + 1.0 / 111_320.0)
         self.assertGreater(far.estimated_lat, near.estimated_lat)
         self.assertIn("Not a measured location", str(far.as_dict()["location_note"]))
+
+    def test_inference_is_a_few_frames_per_second_and_display_is_thirty(self) -> None:
+        from wildcraft_inference.runtime import DISPLAY_PERIOD_S, INFERENCE_PERIOD_S
+
+        infer_fps = 1.0 / INFERENCE_PERIOD_S
+        self.assertGreaterEqual(infer_fps, 3.0)
+        self.assertLessEqual(infer_fps, 5.0)
+        self.assertAlmostEqual(1.0 / DISPLAY_PERIOD_S, 30.0)
 
 
 class ModelPathTests(unittest.TestCase):

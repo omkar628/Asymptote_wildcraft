@@ -2,15 +2,20 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  API_BASE_URL,
   detectApiRuntime,
   resolveApiBase,
+  SENSOR_WS_URL,
   unreachableApiMessage,
+  websocketFailedMessage,
   websocketUrlFromBase,
 } from './apiBase.ts';
 
 const env = 'http://10.241.226.2:8000';
 
 test('a physical phone uses the current LAN address', () => {
+  assert.equal(API_BASE_URL, 'http://10.241.226.2:8000');
+  assert.equal(SENSOR_WS_URL, 'ws://10.241.226.2:8000/ws/sensors');
   assert.equal(
     resolveApiBase({ stored: null, envValue: env, runtime: 'physical' }),
     'http://10.241.226.2:8000',
@@ -86,8 +91,11 @@ test('runtime detection follows the host, not one shared address', () => {
   assert.equal(detectApiRuntime({ os: 'web', isDevice: true, webHostname: '10.241.226.2' }), 'web-lan');
 });
 
-test('the unreachable error names the address that failed', () => {
-  const message = unreachableApiMessage('http://10.241.226.2:8000');
-  assert.match(message, /10\.241\.226\.2:8000/);
-  assert.match(message, /ws:\/\/10\.241\.226\.2:8000\/ws\/sensors/);
+test('connection errors name the failed HTTP or WebSocket address', () => {
+  const httpMessage = unreachableApiMessage('http://10.241.226.2:8000');
+  const socketMessage = websocketFailedMessage('http://10.241.226.2:8000');
+  assert.match(httpMessage, /HTTP request failed/);
+  assert.match(httpMessage, /http:\/\/10\.241\.226\.2:8000/);
+  assert.match(socketMessage, /WebSocket connection failed/);
+  assert.match(socketMessage, /ws:\/\/10\.241\.226\.2:8000\/ws\/sensors/);
 });

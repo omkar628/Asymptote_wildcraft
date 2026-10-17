@@ -6,6 +6,7 @@ import type {
   SerialLinkState,
   SerialStatus,
 } from '../../shared/types';
+import { readGasAlarmField, type GasAlarm } from './gasAlarm';
 
 const SERIAL_STATES = new Set<SerialLinkState>([
   'connecting',
@@ -200,13 +201,26 @@ export function parseStatus(value: unknown): SensorStatus | null {
     storedReadings: value.stored_readings,
     thresholds,
     preliminaryAlerts,
+    gasAlarm: readGasAlarmField(value),
   };
 }
 
 export type SensorSocketMessage =
-  | { type: 'snapshot'; latest: SensorReading | null; serial: SerialStatus; preliminaryAlerts: PreliminaryAlert[] }
-  | { type: 'reading'; reading: SensorReading; preliminaryAlerts: PreliminaryAlert[] }
-  | { type: 'status'; serial: SerialStatus }
+  | {
+      type: 'snapshot';
+      latest: SensorReading | null;
+      serial: SerialStatus;
+      preliminaryAlerts: PreliminaryAlert[];
+      gasAlarm: GasAlarm | null | undefined;
+    }
+  | {
+      type: 'reading';
+      reading: SensorReading;
+      preliminaryAlerts: PreliminaryAlert[];
+      gasAlarm: GasAlarm | null | undefined;
+    }
+  | { type: 'gas_alarm'; gasAlarm: GasAlarm }
+  | { type: 'status'; serial: SerialStatus; gasAlarm: GasAlarm | null | undefined }
   | { type: 'ignore' };
 
 export function parseSocketMessage(raw: string): SensorSocketMessage | null {
@@ -228,14 +242,22 @@ export function parseSocketMessage(raw: string): SensorSocketMessage | null {
     if (!serial || !preliminaryAlerts || value.synthetic === true) {
       return null;
     }
+    const gasAlarm = readGasAlarmField(value);
     if (value.latest === null) {
-      return { type: 'snapshot', latest: null, serial, preliminaryAlerts };
+      return { type: 'snapshot', latest: null, serial, preliminaryAlerts, gasAlarm };
     }
     const latest = parseReading(value.latest);
     if (!latest) {
       return null;
     }
-    return { type: 'snapshot', latest, serial, preliminaryAlerts };
+    return { type: 'snapshot', latest, serial, preliminaryAlerts, gasAlarm };
+  }
+  if (value.type === 'gas_alarm') {
+    const gasAlarm = readGasAlarmField(value);
+    if (!gasAlarm) {
+      return null;
+    }
+    return { type: 'gas_alarm', gasAlarm };
   }
   if (value.type === 'reading') {
     const reading = parseReading(value.reading);
@@ -243,14 +265,14 @@ export function parseSocketMessage(raw: string): SensorSocketMessage | null {
     if (!reading || !preliminaryAlerts || value.synthetic === true) {
       return null;
     }
-    return { type: 'reading', reading, preliminaryAlerts };
+    return { type: 'reading', reading, preliminaryAlerts, gasAlarm: readGasAlarmField(value) };
   }
   if (value.type === 'status') {
     const serial = parseSerialStatus(value.serial);
     if (!serial) {
       return null;
     }
-    return { type: 'status', serial };
+    return { type: 'status', serial, gasAlarm: readGasAlarmField(value) };
   }
   return null;
 }

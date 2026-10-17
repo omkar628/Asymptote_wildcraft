@@ -4,6 +4,7 @@
  */
 
 import { httpStatusApiMessage, timedOutApiMessage, unreachableApiMessage } from '@/services/sensors/apiBase';
+import { parseGasAlarm, readGasAlarmField, type GasAlarm } from '@/services/sensors/gasAlarm';
 import { API_TIMEOUT_MS, HISTORY_LIMIT } from '@/services/sensors/sensorConfig';
 import type {
   AlertSource,
@@ -218,6 +219,7 @@ export function parseStatus(value: unknown): SensorStatusPayload | null {
     storedReadings: value.stored_readings,
     thresholds,
     preliminaryAlerts,
+    gasAlarm: readGasAlarmField(value),
   };
 }
 
@@ -227,6 +229,7 @@ export type SensorSocketMessage =
       latest: SensorReading | null;
       serial: SerialStatus;
       preliminaryAlerts: PreliminaryAlert[];
+      gasAlarm: GasAlarm | null | undefined;
       synthetic: false;
     }
   | {
@@ -234,6 +237,12 @@ export type SensorSocketMessage =
       reading: SensorReading;
       preliminaryAlerts: PreliminaryAlert[];
       alertsChanged: boolean;
+      gasAlarm: GasAlarm | null | undefined;
+      synthetic: false;
+    }
+  | {
+      type: 'gas_alarm';
+      gasAlarm: GasAlarm | null;
       synthetic: false;
     }
   | {
@@ -242,6 +251,7 @@ export type SensorSocketMessage =
   | {
       type: 'status';
       serial: SerialStatus;
+      gasAlarm: GasAlarm | null | undefined;
       synthetic: boolean;
     };
 
@@ -264,14 +274,25 @@ export function parseSocketMessage(raw: string): SensorSocketMessage | null {
     if (!serial || !preliminaryAlerts || value.synthetic !== false) {
       return null;
     }
+    const gasAlarm = readGasAlarmField(value);
     if (value.latest === null) {
-      return { type: 'snapshot', latest: null, serial, preliminaryAlerts, synthetic: false };
+      return { type: 'snapshot', latest: null, serial, preliminaryAlerts, gasAlarm, synthetic: false };
     }
     const latest = parseReading(value.latest);
     if (!latest) {
       return null;
     }
-    return { type: 'snapshot', latest, serial, preliminaryAlerts, synthetic: false };
+    return { type: 'snapshot', latest, serial, preliminaryAlerts, gasAlarm, synthetic: false };
+  }
+  if (value.type === 'gas_alarm') {
+    if (value.synthetic !== false) {
+      return null;
+    }
+    const gasAlarm = readGasAlarmField(value);
+    if (gasAlarm == null) {
+      return null;
+    }
+    return { type: 'gas_alarm', gasAlarm, synthetic: false };
   }
   if (value.type === 'reading') {
     const reading = parseReading(value.reading);
@@ -289,6 +310,7 @@ export function parseSocketMessage(raw: string): SensorSocketMessage | null {
       reading,
       preliminaryAlerts,
       alertsChanged: value.alerts_changed,
+      gasAlarm: readGasAlarmField(value),
       synthetic: false,
     };
   }
@@ -297,20 +319,23 @@ export function parseSocketMessage(raw: string): SensorSocketMessage | null {
     if (!serial || typeof value.synthetic !== 'boolean') {
       return null;
     }
-    return { type: 'status', serial, synthetic: value.synthetic };
+    return { type: 'status', serial, gasAlarm: readGasAlarmField(value), synthetic: value.synthetic };
   }
   return null;
 }
 
-async function requestJson(base: string, path: string): Promise<unknown> {
+async function requestJson(base: string, path: string, init?: RequestInit): Promise<unknown> {
   const url = endpoint(base, path);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
   try {
     const response = await fetch(url, {
+      method: init?.method ?? 'GET',
+      body: init?.body,
       cache: 'no-store',
       headers: {
         Accept: 'application/json',
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
         'Cache-Control': 'no-cache',
         Pragma: 'no-cache',
       },
@@ -365,6 +390,16 @@ export async function fetchStatus(base: string): Promise<SensorStatusPayload> {
   const payload = parseStatus(await requestJson(base, '/api/status'));
   if (!payload) {
     throw new SensorApiError('The status response was not valid.');
+  }
+  return payload;
+}
+
+export async function acknowledgeGasAlarm(base: string): Promise<GasAlarm> {
+  const payload = parseGasAlarm(
+    await requestJson(base, '/api/alarms/gas/acknowledge', { method: 'POST' }),
+  );
+  if (!payload) {
+    throw new SensorApiError('The gas alarm response was not valid.');
   }
   return payload;
 }

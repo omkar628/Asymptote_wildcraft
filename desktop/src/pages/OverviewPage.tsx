@@ -1,6 +1,7 @@
 import { Droplets, Radio, Thermometer, Wind } from 'lucide-react';
 
 import { FireRiskCard } from '../components/FireRiskCard';
+import { GasAlarmBanner } from '../components/GasAlarmBanner';
 import { MetricCard } from '../components/MetricCard';
 import { StatusPill } from '../components/StatusPill';
 import { TrendChart } from '../components/TrendChart';
@@ -25,6 +26,7 @@ export function OverviewPage() {
         <StatusPill label={sensor.freshness} tone={sensor.freshness === 'LIVE' ? 'ok' : sensor.freshness === 'WAITING' || sensor.freshness === 'LINKING' ? 'idle' : 'warn'} />
       </header>
       {sensor.errorText ? <p className="banner error">{sensor.errorText}</p> : null}
+      <GasAlarmBanner alarm={sensor.gasAlarm} ackError={sensor.gasAckError} onAcknowledge={() => void sensor.acknowledgeGasAlarm()} />
       <p className="muted">
         {reading && age
           ? `Last packet received ${age} · packet ${formatPacketTime(reading.timestamp)}`

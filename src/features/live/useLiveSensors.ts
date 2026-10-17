@@ -8,7 +8,14 @@ import {
   parseStoredThresholds,
   serializeThresholds,
 } from '@/services/sensors/preliminaryAlerts';
-import { fetchHistory, fetchLatest, fetchStatus, parseSocketMessage } from '@/services/sensors/sensorApi';
+import { pauseMobileGasCue, resumeMobileGasCue, syncMobileGasCue } from '@/services/sensors/gasAlarmCue';
+import {
+  acknowledgeGasAlarm,
+  fetchHistory,
+  fetchLatest,
+  fetchStatus,
+  parseSocketMessage,
+} from '@/services/sensors/sensorApi';
 import {
   dashboardLinkState,
   detectApiRuntime,
@@ -19,6 +26,8 @@ import {
   STATUS_POLL_MS,
   STORAGE_KEY_BASE,
   STORAGE_KEY_THRESHOLDS,
+  unreachableApiMessage,
+  websocketFailedMessage,
   websocketUrlFromBase,
   type ApiRuntime,
 } from '@/services/sensors/sensorConfig';
@@ -33,6 +42,7 @@ import {
 import { appendReading, replaceWithFetched, sameReading } from '@/services/sensors/readingSeries';
 import { openSensorSocket } from '@/services/sensors/sensorSocket';
 import { readStoredValue, writeStoredValue } from '@/services/sensors/sensorStorage';
+import type { GasAlarm } from '@/services/sensors/gasAlarm';
 import type {
   DashboardLinkState,
   LaptopThresholds,
@@ -83,9 +93,23 @@ export function useLiveSensors() {
   const [history, setHistory] = useState<SensorReading[]>([]);
   const [serial, setSerial] = useState<SerialStatus | null>(null);
   const [laptopAlerts, setLaptopAlerts] = useState<PreliminaryAlert[]>([]);
+  const [gasAlarm, setGasAlarm] = useState<GasAlarm | null>(null);
+  const [ackError, setAckError] = useState<string | null>(null);
+  const [acknowledging, setAcknowledging] = useState(false);
   const [laptopThresholds, setLaptopThresholds] = useState<LaptopThresholds | null>(null);
   const [phoneThresholds, setPhoneThresholds] = useState<PhoneThresholds>(emptyPhoneThresholds);
   const [errorText, setErrorText] = useState<string | null>(null);
+  const httpErrorRef = useRef<string | null>(null);
+  const socketErrorRef = useRef<string | null>(null);
+  const publishConnectionError = useCallback(() => {
+    const httpMessage = httpErrorRef.current;
+    const socketMessage = socketErrorRef.current;
+    if (httpMessage && socketMessage) {
+      setErrorText(`${httpMessage} ${socketMessage}`);
+      return;
+    }
+    setErrorText(httpMessage ?? socketMessage);
+  }, []);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [reachedApi, setReachedApi] = useState(false);
@@ -93,6 +117,7 @@ export function useLiveSensors() {
   const [now, setNow] = useState(() => Date.now());
 
   const baseRef = useRef('');
+  const gasAlarmRef = useRef<GasAlarm | null>(null);
   const historyRef = useRef<SensorReading[]>([]);
   const liveSlotRef = useRef<LiveSlot>(emptyLiveSlot());
   const socketDeliveringRef = useRef(false);
@@ -166,8 +191,12 @@ export function useLiveSensors() {
       setHistory(nextHistory);
       setSerial(snapshot.status.serial);
       setLaptopAlerts(snapshot.status.preliminaryAlerts);
+      if (snapshot.status.gasAlarm !== undefined) {
+        setGasAlarm(snapshot.status.gasAlarm);
+      }
       setLaptopThresholds(snapshot.status.thresholds);
-      setErrorText(null);
+      httpErrorRef.current = null;
+      publishConnectionError();
       setReachedApi(true);
       if (socketDeliveringRef.current) {
         return;
@@ -191,7 +220,11 @@ export function useLiveSensors() {
     setLatest(null);
     setLiveReceivedAt(null);
     setLaptopAlerts([]);
+    setGasAlarm(null);
+    setAckError(null);
     setSerial(null);
+    httpErrorRef.current = null;
+    socketErrorRef.current = null;
     setErrorText(null);
     setReachedApi(false);
     if (!baseUrl) {
@@ -223,13 +256,18 @@ export function useLiveSensors() {
         setPhase(next);
         if (next === 'disconnected') {
           socketDeliveringRef.current = false;
+          socketErrorRef.current = websocketFailedMessage(baseUrl);
+          publishConnectionError();
         }
         if (next === 'connected') {
+          socketErrorRef.current = null;
+          publishConnectionError();
           void reloadRef.current(baseUrl).catch((error: unknown) => {
             if (stopped || baseRef.current !== baseUrl) {
               return;
             }
-            setErrorText(error instanceof Error ? error.message : 'Cannot reach the laptop API.');
+            httpErrorRef.current = error instanceof Error ? error.message : unreachableApiMessage(baseUrl);
+            publishConnectionError();
           });
         }
       },
@@ -245,13 +283,24 @@ export function useLiveSensors() {
         if (message.type === 'synthetic') {
           return;
         }
+        if (message.type === 'gas_alarm') {
+          setGasAlarm(message.gasAlarm);
+          setReachedApi(true);
+          return;
+        }
         if (message.type === 'status') {
           setSerial(message.serial);
+          if (message.gasAlarm !== undefined) {
+            setGasAlarm(message.gasAlarm);
+          }
           return;
         }
         if (message.type === 'snapshot') {
           setSerial(message.serial);
           setLaptopAlerts(message.preliminaryAlerts);
+          if (message.gasAlarm !== undefined) {
+            setGasAlarm(message.gasAlarm);
+          }
           setReachedApi(true);
           const incoming = message.latest;
           const current = liveSlotRef.current;
@@ -267,6 +316,11 @@ export function useLiveSensors() {
         socketDeliveringRef.current = true;
         commitLive(acceptSocketReading(liveSlotRef.current, message.reading, Date.now()), message.reading);
         setLaptopAlerts(message.preliminaryAlerts);
+        if (message.gasAlarm !== undefined) {
+          setGasAlarm(message.gasAlarm);
+        }
+        httpErrorRef.current = null;
+        socketErrorRef.current = null;
         setErrorText(null);
         setReachedApi(true);
       },
@@ -277,7 +331,8 @@ export function useLiveSensors() {
         if (stopped || baseRef.current !== baseUrl) {
           return;
         }
-        setErrorText(error instanceof Error ? error.message : 'Cannot reach the laptop API.');
+        httpErrorRef.current = error instanceof Error ? error.message : unreachableApiMessage(baseUrl);
+        publishConnectionError();
       })
       .finally(() => {
         if (!stopped && baseRef.current === baseUrl) {
@@ -293,6 +348,9 @@ export function useLiveSensors() {
           }
           setSerial(status.serial);
           setLaptopAlerts(status.preliminaryAlerts);
+          if (status.gasAlarm !== undefined) {
+            setGasAlarm(status.gasAlarm);
+          }
           setLaptopThresholds(status.thresholds);
           setReachedApi(true);
         })
@@ -323,19 +381,54 @@ export function useLiveSensors() {
       stopSocket();
       clearInterval(poll);
     };
-  }, [baseUrl, urlReady, retryToken, commitLive]);
+  }, [baseUrl, urlReady, retryToken, commitLive, publishConnectionError]);
+
+  useEffect(() => {
+    gasAlarmRef.current = gasAlarm;
+    syncMobileGasCue(gasAlarm);
+  }, [gasAlarm]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state !== 'active' || !baseRef.current) {
+      if (state !== 'active') {
+        pauseMobileGasCue();
         return;
       }
-      void reloadRef.current(baseRef.current).catch(() => {
-        setErrorText('Cannot reach the laptop API.');
+      resumeMobileGasCue(gasAlarmRef.current);
+      if (!baseRef.current) {
+        return;
+      }
+      void reloadRef.current(baseRef.current).catch((error: unknown) => {
+        const base = baseRef.current;
+        if (!base) {
+          return;
+        }
+        httpErrorRef.current = error instanceof Error ? error.message : unreachableApiMessage(base);
+        publishConnectionError();
       });
     });
     return () => subscription.remove();
   }, []);
+
+  const acknowledgeAlarm = () => {
+    const base = baseRef.current;
+    if (!base) {
+      setAckError('The laptop address is not set.');
+      return;
+    }
+    setAcknowledging(true);
+    setAckError(null);
+    void acknowledgeGasAlarm(base)
+      .then((alarm) => {
+        if (baseRef.current === base) {
+          setGasAlarm(alarm);
+        }
+      })
+      .catch((error: unknown) => {
+        setAckError(error instanceof Error ? error.message : 'The alarm could not be acknowledged.');
+      })
+      .finally(() => setAcknowledging(false));
+  };
 
   const saveUrl = () => {
     const normalized = normalizeApiBase(draftUrl);
@@ -350,7 +443,8 @@ export function useLiveSensors() {
     });
     if (normalized === baseUrl) {
       void reloadRef.current(normalized).catch((error: unknown) => {
-        setErrorText(error instanceof Error ? error.message : 'Cannot reach the laptop API.');
+        httpErrorRef.current = error instanceof Error ? error.message : unreachableApiMessage(normalized);
+        publishConnectionError();
       });
       return;
     }
@@ -371,12 +465,16 @@ export function useLiveSensors() {
     setRefreshing(true);
     void reloadRef.current(baseRef.current)
       .catch((error: unknown) => {
-        setErrorText(error instanceof Error ? error.message : 'Cannot reach the laptop API.');
+        const base = baseRef.current;
+        httpErrorRef.current = error instanceof Error ? error.message : unreachableApiMessage(base ?? '');
+        publishConnectionError();
       })
       .finally(() => setRefreshing(false));
   };
 
   const retry = () => {
+    httpErrorRef.current = null;
+    socketErrorRef.current = null;
     setErrorText(null);
     if (!baseRef.current) {
       return;
@@ -408,6 +506,10 @@ export function useLiveSensors() {
     liveReceivedAt,
     history,
     alerts: [...laptopAlerts, ...phoneAlerts],
+    gasAlarm,
+    ackError,
+    acknowledging,
+    acknowledgeAlarm,
     laptopThresholds,
     phoneThresholds,
     draftUrl,

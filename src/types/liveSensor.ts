@@ -1,3 +1,5 @@
+import type { GasAlarm } from '@/services/sensors/gasAlarm';
+
 /** Live NodeMCU receiver data. This is separate from the demonstration catalog. */
 
 export type SensorReading = {
@@ -70,4 +72,5 @@ export type SensorStatusPayload = {
   storedReadings: number;
   thresholds: LaptopThresholds;
   preliminaryAlerts: PreliminaryAlert[];
+  gasAlarm?: GasAlarm | null;
 };

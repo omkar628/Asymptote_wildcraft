@@ -5,6 +5,7 @@ import { AI_DISCLAIMER } from '../../shared/types';
 import { bridge } from '../bridge';
 import { useInferenceFeed, type InferenceFeed } from '../hooks/useInferenceFeed';
 import { useSensorFeed, type SensorFeed } from '../hooks/useSensorFeed';
+import { syncDesktopGasCue } from '../services/gasAlarmSound';
 import { requestJson } from '../services/http';
 import { parseDetection } from '../services/inferenceParse';
 
@@ -29,6 +30,8 @@ export function ForestProvider({ children }: { children: ReactNode }) {
   const sensor = useSensorFeed(settings?.backendUrl ?? '');
   const inference = useInferenceFeed(settings?.inferenceUrl ?? '');
   const sensorRules = useRef<Set<string>>(new Set());
+  const gasEvents = useRef<Set<string>>(new Set());
+  const gasAcked = useRef<Set<string>>(new Set());
   const offlineEpisode = useRef(false);
   const staleEpisode = useRef(false);
   const cameraState = useRef('idle');
@@ -117,6 +120,42 @@ export function ForestProvider({ children }: { children: ReactNode }) {
       offlineEpisode.current = false;
     }
   }, [sensor.serial, sensor.reachedApi]);
+
+  useEffect(() => {
+    syncDesktopGasCue(sensor.gasAlarm);
+  }, [sensor.gasAlarm]);
+
+  useEffect(() => {
+    const alarm = sensor.gasAlarm;
+    if (!alarm?.event_id || alarm.state !== 'ALARM_ACTIVE' || gasEvents.current.has(alarm.event_id)) {
+      return;
+    }
+    gasEvents.current.add(alarm.event_id);
+    void saveAlert({
+      id: `gas:${alarm.event_id}`,
+      createdAt: alarm.started_at ?? new Date().toISOString(),
+      kind: 'sensor_warning',
+      severity: 'critical',
+      title: 'MQ raw reading above 650',
+      detail: alarm.detail,
+      sourceLabel: 'MQ raw threshold',
+      dedupeKey: `gas:${alarm.event_id}`,
+      acknowledged: false,
+      acknowledgedAt: null,
+    });
+  }, [sensor.gasAlarm]);
+
+  useEffect(() => {
+    const alarm = sensor.gasAlarm;
+    if (!alarm?.event_id || !alarm.acknowledged_at || gasAcked.current.has(alarm.event_id)) {
+      return;
+    }
+    gasAcked.current.add(alarm.event_id);
+    void bridge()
+      .acknowledgeAlert(`gas:${alarm.event_id}`)
+      .then(() => reloadAlerts())
+      .catch(() => undefined);
+  }, [sensor.gasAlarm]);
 
   useEffect(() => {
     if (sensor.freshness !== 'STALE') {

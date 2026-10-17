@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { predictFireRisk } from './fireRisk';
 import { cameraLinkText, detectionLinkText, detectionStatusText, modelLinkText, parseInferenceStatus } from './inferenceParse';
+import { gasAlarmTriggered, parseGasAlarm, shouldStartGasCue, type GasAlarm } from './gasAlarm';
 import { parseReading, parseSocketMessage } from './sensorParse';
 import type { InferenceStatus } from '../../shared/types';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -57,6 +58,75 @@ test('real websocket readings keep the serial source', () => {
     }),
   );
   assert.equal(message?.type, 'reading');
+});
+
+const gasAlarm = (overrides: Partial<GasAlarm> = {}): GasAlarm => ({
+  state: 'ALARM_ACTIVE',
+  activation_threshold: 750,
+  recovery_threshold: 750,
+  units: 'raw',
+  mq9_raw: 751,
+  mq135_raw: 751,
+  mq9_above: true,
+  mq135_above: true,
+  triggered_sensors: ['mq9', 'mq135'],
+  event_id: 'gas-1',
+  started_at: '2026-10-17T12:00:00.000+05:30',
+  acknowledged_at: null,
+  reading_status: 'valid',
+  safe_to_treat_as_normal: false,
+  detail: 'BOTH GAS SENSORS ABOVE 750. MQ9 raw 751 and MQ135 raw 751 are above the threshold together. This is one alarm.',
+  link_down: false,
+  ...overrides,
+});
+
+test('a gas alarm event starts sound once and acknowledgement does not', () => {
+  const active = gasAlarm();
+  assert.equal(shouldStartGasCue(null, active), 'gas-1');
+  assert.equal(shouldStartGasCue('gas-1', active), null);
+  assert.equal(shouldStartGasCue('gas-1', gasAlarm({ mq9_raw: 780, mq135_raw: 800, triggered_sensors: ['mq9', 'mq135'] })), null);
+  assert.equal(shouldStartGasCue('gas-1', gasAlarm({ state: 'ACKNOWLEDGED', acknowledged_at: '2026-10-17T12:01:00.000+05:30' })), null);
+  assert.equal(shouldStartGasCue('gas-1', gasAlarm({ state: 'NORMAL', event_id: null, mq9_raw: 100, mq135_raw: 100, mq9_above: false, mq135_above: false, triggered_sensors: [] })), null);
+  assert.equal(shouldStartGasCue(null, gasAlarm({ state: 'ALARM_ACTIVE', event_id: 'gas-2', mq9_raw: 900, mq135_raw: 810 })), 'gas-2');
+  assert.equal(shouldStartGasCue(null, gasAlarm({ state: 'SENSOR_DATA_STALE', reading_status: 'stale' })), null);
+  assert.equal(shouldStartGasCue(null, gasAlarm({ state: 'INCOMPLETE', event_id: null, mq9_raw: null, mq9_above: false, reading_status: 'incomplete', triggered_sensors: [] })), null);
+  assert.equal(shouldStartGasCue(null, gasAlarm({ mq9_raw: 800, mq135_raw: 400, mq135_above: false, triggered_sensors: ['mq9'] })), null);
+  assert.equal(shouldStartGasCue(null, gasAlarm({ mq9_raw: 750, mq135_raw: 750, mq9_above: false, mq135_above: false })), null);
+  assert.equal(shouldStartGasCue(null, gasAlarm({ mq9_raw: null, mq135_raw: 900, mq9_above: false, reading_status: 'incomplete' })), null);
+});
+
+test('the mobile gas rule is both sensors strictly above 750', () => {
+  assert.equal(gasAlarmTriggered(653, 638), false);
+  assert.equal(gasAlarmTriggered(751, 740), false);
+  assert.equal(gasAlarmTriggered(740, 751), false);
+  assert.equal(gasAlarmTriggered(750, 750), false);
+  assert.equal(gasAlarmTriggered(751, 751), true);
+  assert.equal(gasAlarmTriggered(800, 780), true);
+  assert.equal(gasAlarmTriggered(900, 810), true);
+  assert.equal(gasAlarmTriggered(null, 900), false);
+  assert.equal(gasAlarmTriggered(900, null), false);
+  assert.equal(gasAlarmTriggered(Number.NaN, 900), false);
+});
+
+test('gas alarm messages parse without dropping the sensor reading', () => {
+  const parsed = parseGasAlarm(gasAlarm());
+  assert.equal(parsed?.state, 'ALARM_ACTIVE');
+  assert.equal(parsed?.units, 'raw');
+  const message = parseSocketMessage(
+    JSON.stringify({
+      type: 'reading',
+      synthetic: false,
+      reading,
+      preliminary_alerts: [],
+      gas_alarm: gasAlarm(),
+    }),
+  );
+  assert.equal(message?.type, 'reading');
+  if (message?.type === 'reading') {
+    assert.equal(message.gasAlarm?.event_id, 'gas-1');
+    assert.equal(message.reading.mq9_raw, 479);
+  }
+  assert.equal(parseGasAlarm({ ...gasAlarm(), units: 'ppm' }), null);
 });
 
 test('fire risk stays unavailable without a packet', () => {

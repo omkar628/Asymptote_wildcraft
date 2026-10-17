@@ -10,6 +10,7 @@ import { BackendSettingsCard } from '@/features/live/BackendSettingsCard';
 import { LiveConnectionStatus } from '@/features/live/LiveConnectionStatus';
 import { SensorMetricCard } from '@/features/live/SensorMetricCard';
 import { useLiveSensors } from '@/features/live/useLiveSensors';
+import { GasAlarmBanner } from '@/features/live/GasAlarmBanner';
 import { FireRiskCard } from '@/features/overview/FireRiskCard';
 import { predictFireRisk } from '@/services/sensors/fireRisk';
 import { colors, iconSize, spacing, typography } from '@/theme';
@@ -96,6 +97,12 @@ export function OverviewScreen() {
           />
         ) : null}
 
+        <GasAlarmBanner
+          ackError={live.ackError}
+          acknowledging={live.acknowledging}
+          alarm={live.gasAlarm}
+          onAcknowledge={live.acknowledgeAlarm}
+        />
         <FireRiskCard assessment={assessment} />
 
         <Text style={styles.section}>Receiver</Text>

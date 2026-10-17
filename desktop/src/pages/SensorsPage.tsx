@@ -1,5 +1,6 @@
 import { Droplets, Radio, Thermometer, Wind } from 'lucide-react';
 
+import { GasAlarmBanner } from '../components/GasAlarmBanner';
 import { MetricCard } from '../components/MetricCard';
 import { StatusPill } from '../components/StatusPill';
 import { TrendChart } from '../components/TrendChart';
@@ -22,6 +23,7 @@ export function SensorsPage() {
         <StatusPill label={sensor.link} tone={sensor.link === 'Connected' ? 'ok' : sensor.link === 'Connecting' ? 'idle' : 'bad'} />
       </header>
       {sensor.errorText ? <p className="banner error">{sensor.errorText}</p> : null}
+      <GasAlarmBanner alarm={sensor.gasAlarm} ackError={sensor.gasAckError} onAcknowledge={() => void sensor.acknowledgeGasAlarm()} />
       {sensor.freshness === 'STALE' ? <p className="banner warn">STALE · no packet received for over 60 seconds.</p> : null}
       <section className="card">
         <h2>Node connection</h2>

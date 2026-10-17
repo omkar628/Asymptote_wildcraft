@@ -27,6 +27,9 @@ SETTING_KEYS = [
     "SENSOR_ALERT_MQ135_RAW_HIGH",
     "SENSOR_ALERT_MQ9_RAW_HIGH",
     "SENSOR_ALERT_RSSI_DBM_LOW",
+    "SENSOR_GAS_ALARM_ACTIVATION",
+    "SENSOR_GAS_ALARM_RECOVERY",
+    "SENSOR_GAS_ALARM_STALE_SECONDS",
 ]
 
 
@@ -53,6 +56,9 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNone(settings.mq135_raw_high)
         self.assertIsNone(settings.mq9_raw_high)
         self.assertIsNone(settings.rssi_dbm_low)
+        self.assertEqual(settings.gas_activation, 750.0)
+        self.assertEqual(settings.gas_recovery, 750.0)
+        self.assertEqual(settings.gas_stale_s, 60.0)
 
     def test_invalid_threshold_is_rejected(self) -> None:
         saved = os.environ.get("SENSOR_ALERT_TEMP_C_HIGH")

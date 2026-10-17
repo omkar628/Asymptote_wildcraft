@@ -1,4 +1,5 @@
 import type { BBox } from './areas';
+import type { SensitivityResult } from './fireModel';
 
 export const METERS_PER_DEGREE_LAT = 111_320;
 export const MAX_GRID_CELLS = 6000;
@@ -33,7 +34,11 @@ export type RiskResult = {
   uncertainty: string;
 };
 
-export type ScoredCell = GridCell & { risk: RiskResult };
+export type ScoredCell = GridCell & {
+  risk: RiskResult;
+  sensitivity?: SensitivityResult;
+  spreadIntensity?: number | null;
+};
 
 export type WeatherInputs = {
   temperatureC: number | null;

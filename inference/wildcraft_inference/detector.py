@@ -18,7 +18,7 @@ os.environ.setdefault("YOLO_OFFLINE", "true")
 # Dummy camera position for the on-screen estimate. This is not a surveyed site.
 CAMERA_LAT = 21.1458
 CAMERA_LON = 79.0882
-SMOKE_CONFIDENCE = 0.50
+SMOKE_CONFIDENCE = 0.40
 FIRE_CONFIDENCE = 0.20
 MAX_DISTANCE_M = 50.0
 MIN_DISTANCE_M = 1.0
@@ -109,9 +109,7 @@ class Detector:
             error = None if ready else self._error
         if model is None:
             return [], error or "The YOLO model is not loaded."
-        # YOLO must return anything at the lower class gate. Smoke is filtered again below.
-        floor = min(SMOKE_CONFIDENCE, FIRE_CONFIDENCE)
-        del confidence
+        floor = model_confidence(confidence)
         try:
             results = _predict(model, frame_bgr, floor, device)
         except Exception as exc:
@@ -175,14 +173,36 @@ def close_window() -> None:
         return
 
 
+def model_confidence(requested: float) -> float:
+    """Keep the YOLO confidence at or below the fire gate.
+
+    A saved setting such as 0.35 must not drop a fire of 0.20 before the
+    class check. A lower requested value still reaches that check. Smoke is
+    filtered again by keeps_class.
+    """
+
+    floor = min(SMOKE_CONFIDENCE, FIRE_CONFIDENCE)
+    if isinstance(requested, (int, float)) and requested > 0:
+        floor = min(floor, float(requested))
+    return floor
+
+
+def box_label(class_name: str, confidence: float) -> str:
+    """Fire shows a percentage. Smoke keeps the decimal score."""
+
+    if class_name.strip().lower() == "fire":
+        return f"fire {confidence * 100:.0f}%"
+    return f"{class_name} {confidence:.2f}"
+
+
 def keeps_class(class_name: str, score: float) -> bool:
-    """Smoke stays only above 0.50. Fire stays only above 0.20. Other names are dropped."""
+    """Smoke stays at 0.40 or higher. Fire stays at 0.20 or higher. Other names are dropped."""
 
     key = class_name.strip().lower()
     if key == "smoke":
-        return score > SMOKE_CONFIDENCE
+        return score >= SMOKE_CONFIDENCE
     if key == "fire":
-        return score > FIRE_CONFIDENCE
+        return score >= FIRE_CONFIDENCE
     return False
 
 
@@ -232,7 +252,7 @@ def draw_boxes(frame_bgr, boxes: list[Box]):
         color = (24, 35, 180) if annotated.class_name.strip().lower() == "fire" else (8, 99, 169)
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
         lines = [
-            f"{annotated.class_name} {annotated.confidence:.2f}",
+            box_label(annotated.class_name, annotated.confidence),
             f"est {annotated.distance_m:.1f} m",
             f"est {annotated.estimated_lat:.4f}, {annotated.estimated_lon:.4f}",
         ]

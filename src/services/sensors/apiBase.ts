@@ -1,9 +1,11 @@
 /** Laptop API address selection. One place owns the host used by HTTP and WebSocket. */
 
+/** Wi-Fi IPv4 for this laptop. DHCP can change it. Update this, .env, and restart Expo with npx expo start -c. */
 export const LAN_API_BASE = 'http://10.241.226.2:8000';
+export const API_BASE_URL = LAN_API_BASE;
 export const EMULATOR_API_BASE = 'http://10.0.2.2:8000';
 export const LOOPBACK_API_BASE = 'http://127.0.0.1:8000';
-/** Addresses baked into older builds. A saved copy must not keep beating the current LAN address. */
+/** Addresses from an earlier network. A saved copy must not keep beating the current LAN address. */
 export const PREVIOUS_LAN_API_BASES = ['http://10.236.143.146:8000'] as const;
 
 export type ApiRuntime = 'physical' | 'android-emulator' | 'ios-simulator' | 'web-local' | 'web-lan';
@@ -50,6 +52,8 @@ export function websocketUrlFromBase(base: string): string {
   return '';
 }
 
+export const SENSOR_WS_URL = websocketUrlFromBase(API_BASE_URL);
+
 export function detectApiRuntime(input: {
   os: string;
   isDevice: boolean | null;
@@ -95,12 +99,16 @@ export function resolveApiBase(input: {
 }
 
 export function unreachableApiMessage(base: string): string {
+  return `HTTP request failed for ${base}. The phone and laptop must be on the same Wi-Fi.`;
+}
+
+export function websocketFailedMessage(base: string): string {
   const socket = websocketUrlFromBase(base);
-  return `Cannot reach the laptop API at ${base}. The phone and laptop must be on the same Wi-Fi. WebSocket: ${socket || 'unavailable'}.`;
+  return `WebSocket connection failed for ${socket || base}.`;
 }
 
 export function timedOutApiMessage(base: string): string {
-  return `The laptop API at ${base} did not respond in time.`;
+  return `HTTP request to ${base} did not respond in time.`;
 }
 
 export function httpStatusApiMessage(base: string, status: number): string {

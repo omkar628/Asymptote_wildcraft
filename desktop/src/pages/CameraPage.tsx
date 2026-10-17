@@ -263,7 +263,7 @@ export function CameraPage() {
             </button>
           </div>
           <p className="muted">The list shows cameras that returned a frame. A Lenovo name is preferred when Windows reports one. Index 0 is not assumed.</p>
-          <p className="muted">Smoke is kept only when confidence is above 0.50.  Fire is kept only when confidence is above 0.20. The OpenCV window shows an estimated distance from the box area and an estimated coordinate offset from a dummy camera point. That coordinate is not a measured location.</p>
+          <p className="muted">Smoke is kept at 0.40 or higher. Fire is kept at 0.20 or higher. The fire label shows that confidence as a percentage. The picture refreshes at 30 FPS and the model runs about 4 times a second, so the last boxes stay on screen between updates. Distance and the coordinate on the picture are estimates from the box area and a dummy camera point, not a measured location.</p>
           <div className="button-row">
             <button type="button" className="button" data-action="start-detection" disabled={busy || inference.phase !== 'connected'} onClick={() => void (stats?.running ? stopDetection() : resumeDetection())}>
               {stats?.running ? 'Stop detection' : 'Start detection'}

@@ -30,6 +30,9 @@ MAX_SPAN_DEGREES = 10.0
 CACHE_SECONDS = 600
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, dict]] = {}
+_last_success_at: str | None = None
+_last_error: str | None = None
+_last_error_at: str | None = None
 
 
 class FirmsError(Exception):
@@ -51,7 +54,23 @@ def firms_status_payload() -> dict:
         "products": [{"id": key, "label": label} for key, label in FIRMS_PRODUCTS.items()],
         "source": "NASA FIRMS area API",
         "documentation": "https://firms.modaps.eosdis.nasa.gov/api/area/",
+        "last_success_at": _last_success_at,
+        "last_error": _last_error,
+        "last_error_at": _last_error_at,
     }
+
+
+def _remember_success() -> None:
+    global _last_success_at, _last_error, _last_error_at
+    _last_success_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _last_error = None
+    _last_error_at = None
+
+
+def _remember_error(message: str) -> None:
+    global _last_error, _last_error_at
+    _last_error = message
+    _last_error_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def scrub(text: str, map_key: str) -> str:
@@ -225,10 +244,12 @@ def load_hotspots(
                     continue
                 seen.add(identity)
                 merged.append(hotspot)
-    except FirmsError:
+    except FirmsError as exc:
+        _remember_error(exc.message)
         raise
     except Exception as exc:
         safe = scrub(str(exc), map_key)
+        _remember_error("NASA FIRMS request failed.")
         if map_key in safe:
             raise FirmsError("NASA FIRMS request failed.", 502) from None
         raise FirmsError("NASA FIRMS request failed.", 502) from None
@@ -248,6 +269,7 @@ def load_hotspots(
         "hotspots": merged,
         "note": "Each FIRMS area call returns at most 5 days. A 6- or 7-day window uses two calls. These are satellite detections, not confirmed fire perimeters.",
     }
+    _remember_success()
     with _cache_lock:
         _cache[cache_key] = (now, payload)
     return payload

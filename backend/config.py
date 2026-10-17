@@ -49,6 +49,19 @@ def _require_int(name: str, default: int, minimum: int) -> int:
     return value
 
 
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError as exc:
+        raise SystemExit(f"[sensor] {name} must be a number. Got {raw!r}.") from exc
+    if not math.isfinite(value):
+        raise SystemExit(f"[sensor] {name} must be a finite number.")
+    return value
+
+
 def _optional_float(name: str) -> float | None:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -91,6 +104,9 @@ class Settings:
     mq135_raw_high: float | None
     mq9_raw_high: float | None
     rssi_dbm_low: float | None
+    gas_activation: float = 750.0
+    gas_recovery: float = 750.0
+    gas_stale_s: float = 60.0
 
     @classmethod
     def from_env(cls, *, load_file: bool = True) -> Settings:
@@ -111,6 +127,15 @@ class Settings:
             )
         if memory_limit < history_max:
             memory_limit = history_max
+        gas_activation = _float_env("SENSOR_GAS_ALARM_ACTIVATION", 750.0)
+        gas_recovery = _float_env("SENSOR_GAS_ALARM_RECOVERY", 750.0)
+        gas_stale_s = _float_env("SENSOR_GAS_ALARM_STALE_SECONDS", 60.0)
+        if gas_activation <= 0 or gas_recovery < 0 or gas_recovery > gas_activation or gas_stale_s < 1:
+            raise SystemExit(
+                "[sensor] Gas alarm settings are invalid. "
+                "SENSOR_GAS_ALARM_RECOVERY must be from 0 through SENSOR_GAS_ALARM_ACTIVATION, "
+                "and SENSOR_GAS_ALARM_STALE_SECONDS must be at least 1."
+            )
         return cls(
             serial_port=port_name,
             baud_rate=_require_int("SENSOR_BAUD_RATE", 115200, 1),
@@ -127,4 +152,7 @@ class Settings:
             mq135_raw_high=_optional_float("SENSOR_ALERT_MQ135_RAW_HIGH"),
             mq9_raw_high=_optional_float("SENSOR_ALERT_MQ9_RAW_HIGH"),
             rssi_dbm_low=_optional_float("SENSOR_ALERT_RSSI_DBM_LOW"),
+            gas_activation=gas_activation,
+            gas_recovery=gas_recovery,
+            gas_stale_s=gas_stale_s,
         )

@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 
 import type { DesktopSettings } from '../../shared/types';
 import { cameraPathWarning, streamUrlFromIp } from '../../shared/validate';
+import { getOpsDocument, setRules, subscribeOps } from '../ops/opsStore';
 import { requestJson } from '../services/http';
 import { useForest } from '../state/ForestContext';
 
@@ -142,6 +143,43 @@ export function SettingsPage() {
           </button>
         </div>
       </form>
+      <DispatchSettings />
     </div>
+  );
+}
+
+function DispatchSettings() {
+  const rules = useSyncExternalStore(subscribeOps, getOpsDocument, getOpsDocument).rules;
+  return (
+    <section className="card stack">
+      <h2>Autonomous dispatch</h2>
+      <p className="muted">These rules decide when the Tadoba map starts a simulated drone mission. They do not command an aircraft. Smoke is qualifying at or above 0.40 and fire at or above 0.20 unless you change the values here. A gas reading counts only when it is fresh and strictly above the raw threshold. Missing readings are not treated as zero.</p>
+      <label>
+        Auto dispatch
+        <select value={rules.autoDispatch} onChange={(event) => setRules({ autoDispatch: event.target.value as 'off' | 'combined' | 'fire_and_gas' | 'smoke_and_gas' | 'any_alert' })}>
+          <option value="combined">Combined camera and gas</option>
+          <option value="fire_and_gas">Fire and gas only</option>
+          <option value="smoke_and_gas">Smoke and gas only</option>
+          <option value="any_alert">Any alert, including single-source</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+      <label>
+        Match window seconds
+        <input type="number" min={5} max={300} value={Math.round(rules.matchWindowMs / 1000)} onChange={(event) => setRules({ matchWindowMs: Number(event.target.value) * 1000 })} />
+      </label>
+      <label>
+        Gas threshold, strictly above this raw value
+        <input type="number" min={1} max={4095} value={rules.mq135High} onChange={(event) => setRules({ mq135High: Number(event.target.value), mq9High: Number(event.target.value) })} />
+      </label>
+      <label>
+        Simulated speed m/s
+        <input type="number" min={20} max={2000} value={rules.simSpeedMps} onChange={(event) => setRules({ simSpeedMps: Number(event.target.value) })} />
+      </label>
+      <label>
+        Arrival radius metres
+        <input type="number" min={20} max={500} value={rules.arrivalRadiusM} onChange={(event) => setRules({ arrivalRadiusM: Number(event.target.value) })} />
+      </label>
+    </section>
   );
 }

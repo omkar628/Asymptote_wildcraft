@@ -11,8 +11,12 @@ import asyncio
 import json
 import logging
 import math
+import socket
 import threading
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Literal
 
 import uvicorn
@@ -22,7 +26,10 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from alerts import AlertEngine, Thresholds
 from config import Settings
+from fire_model import build_scenario
 from firms import FirmsError, firms_status_payload, load_hotspots
+from gas_alarm import GasAlarmEngine, parse_timestamp
+from mission_store import MissionError, MissionLog
 from serial_collector import (
     CsvLog,
     ReadingStore,
@@ -35,6 +42,59 @@ from serial_collector import (
 )
 
 SerialState = Literal["connecting", "connected", "reconnecting", "disconnected", "disabled"]
+
+
+class FireScenarioIn(BaseModel):
+    ignition: dict | None = None
+    forecast_hours: int = 24
+    samples: list[dict] = []
+    fuel_modifier: float | None = None
+    slope_modifier: float | None = None
+
+
+class MissionCreateIn(BaseModel):
+    incident_id: str
+    mission_id: str
+    launch_lat: float
+    launch_lon: float
+    destination_lat: float
+    destination_lon: float
+    destination_kind: str | None = None
+    destination_node_id: str | None = None
+    state: str | None = None
+    summary: str | None = None
+    simulation: bool
+    kind: str | None = None
+    evidence_class: str | None = None
+    payload: dict = {}
+
+
+class MissionTransitionIn(BaseModel):
+    state: str
+    summary: str | None = None
+    outcome: str | None = None
+    simulation: bool = True
+
+
+class MissionPositionIn(BaseModel):
+    lat: float
+    lon: float
+    heading_deg: float = 0
+    distance_remaining_m: float = 0
+    state: str | None = None
+    simulation: bool
+    persist: bool = False
+
+
+class IncidentRecordIn(BaseModel):
+    kind: str
+    incident_id: str
+    mission_id: str | None = None
+    state: str | None = None
+    summary: str
+    evidence_class: str | None = None
+    category: str | None = None
+    payload: dict = {}
 
 
 class ReadingOut(BaseModel):
@@ -133,6 +193,25 @@ class AlertOut(BaseModel):
     severity: Literal["warning"]
 
 
+class GasAlarmOut(BaseModel):
+    state: Literal["NORMAL", "ALARM_ACTIVE", "ACKNOWLEDGED", "SENSOR_DATA_STALE", "INCOMPLETE"]
+    activation_threshold: float
+    recovery_threshold: float
+    units: Literal["raw"]
+    mq9_raw: float | None
+    mq135_raw: float | None
+    mq9_above: bool
+    mq135_above: bool
+    triggered_sensors: list[Literal["mq9", "mq135"]]
+    event_id: str | None
+    started_at: str | None
+    acknowledged_at: str | None
+    reading_status: Literal["valid", "incomplete", "stale", "missing"]
+    safe_to_treat_as_normal: bool
+    detail: str
+    link_down: bool
+
+
 class HealthOut(BaseModel):
     status: Literal["ok"]
     api: Literal["running"]
@@ -145,6 +224,7 @@ class StatusOut(BaseModel):
     stored_readings: int
     thresholds: ThresholdsOut
     preliminary_alerts: list[AlertOut]
+    gas_alarm: GasAlarmOut
 
 
 class TestInjectBody(BaseModel):
@@ -219,6 +299,11 @@ class Hub:
                 rssi_dbm_low=settings.rssi_dbm_low,
             )
         )
+        self.gas = GasAlarmEngine(
+            activation=settings.gas_activation,
+            recovery=settings.gas_recovery,
+            stale_s=settings.gas_stale_s,
+        )
         self.manager = ConnectionManager()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.collector: SerialCollector | None = None
@@ -230,6 +315,7 @@ class Hub:
             self.store.add(reading)
         if self.store.latest is not None:
             self.alerts.observe(self.store.latest)
+            self._observe_gas(self.store.latest)
 
     def serial_status(self) -> dict[str, object]:
         with self._status_lock:
@@ -260,14 +346,57 @@ class Hub:
             }
         if unchanged:
             return
+        self.refresh_gas()
         message = {
             "type": "status",
             "serial": SerialStatusOut(**current).model_dump(),
+            "gas_alarm": self.gas_alarm_body(),
             "synthetic": False,
         }
         self.publish(message)
 
+    def link_down(self) -> bool:
+        with self._status_lock:
+            return self.serial_state in {"disconnected", "reconnecting"}
+
+    def refresh_gas(self) -> dict[str, object]:
+        return self.gas.tick(datetime.now().astimezone(), link_down=self.link_down())
+
+    def acknowledge_gas(self) -> dict[str, object]:
+        return self.gas.acknowledge(datetime.now().astimezone())
+
+    def gas_alarm_body(self) -> dict[str, object]:
+        try:
+            return GasAlarmOut(**self.gas.payload()).model_dump()
+        except Exception as exc:
+            log_line(f"[sensor] Gas alarm payload was not sent: {exc}")
+            fallback = GasAlarmEngine(
+                activation=self.settings.gas_activation,
+                recovery=self.settings.gas_recovery,
+                stale_s=self.settings.gas_stale_s,
+            )
+            return GasAlarmOut(**fallback.payload()).model_dump()
+
+    def _observe_gas(self, reading: SensorReading) -> None:
+        previous = self.gas.event_id
+        at = parse_timestamp(reading.timestamp) or datetime.now().astimezone()
+        age = (datetime.now().astimezone() - at).total_seconds()
+        fresh = age <= self.settings.gas_stale_s
+        current = self.gas.observe_values(
+            reading.mq9_raw,
+            reading.mq135_raw,
+            at=at,
+            fresh=fresh,
+            link_down=self.link_down(),
+        )
+        event_id = current.get("event_id")
+        if isinstance(event_id, str) and event_id != previous:
+            log_line(f"[sensor] Gas alarm {event_id}. {current.get('detail')}")
+        elif previous and not event_id:
+            log_line(f"[sensor] Gas alarm {previous} cleared.")
+
     def snapshot_message(self) -> dict:
+        self.refresh_gas()
         latest = None
         if self.store.latest is not None:
             latest = ReadingOut(**self.store.latest.as_dict()).model_dump()
@@ -276,6 +405,7 @@ class Hub:
             "latest": latest,
             "serial": SerialStatusOut(**self.serial_status()).model_dump(),
             "preliminary_alerts": [AlertOut(**item).model_dump() for item in self.alerts.payload()],
+            "gas_alarm": self.gas_alarm_body(),
             "synthetic": False,
         }
 
@@ -285,6 +415,7 @@ class Hub:
             "reading": ReadingOut(**reading.as_dict()).model_dump(),
             "preliminary_alerts": [AlertOut(**item).model_dump() for item in self.alerts.payload()],
             "alerts_changed": changed,
+            "gas_alarm": self.gas_alarm_body(),
             "synthetic": False,
         }
 
@@ -297,6 +428,10 @@ class Hub:
             log_line(f"[sensor] CSV write failed. The reading was not saved: {exc}")
         self.store.add(reading)
         observed = self.alerts.observe(reading)
+        try:
+            self._observe_gas(reading)
+        except Exception as exc:
+            log_line(f"[sensor] Gas alarm update failed: {exc}")
         if not saved:
             log_line("[sensor] Reading is in memory only and was not written to the CSV log.")
         log_line(format_reading(reading))
@@ -355,6 +490,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.hub.loop = asyncio.get_running_loop()
+        gas_task = asyncio.create_task(_watch_gas_alarm(app))
         current: Settings = app.state.settings
         if current.serial_enabled:
             app.state.hub.collector = SerialCollector(
@@ -369,6 +505,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            gas_task.cancel()
+            try:
+                await gas_task
+            except asyncio.CancelledError:
+                pass
             collector = app.state.hub.collector
             app.state.hub.collector = None
             if collector is not None:
@@ -377,6 +518,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Forest sensor API", lifespan=lifespan)
     app.state.settings = resolved
     app.state.hub = hub
+    app.state.missions = MissionLog(resolved.csv_path.parent / "mission_records.jsonl")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -405,6 +547,81 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except FirmsError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
 
+    @app.post("/api/fire/scenario")
+    def fire_scenario(scenario: FireScenarioIn) -> dict:
+        return build_scenario(scenario.model_dump())
+
+    @app.get("/api/missions/current")
+    def mission_current() -> dict:
+        return {"mission": app.state.missions.current(), "simulation_only": True}
+
+    @app.post("/api/missions")
+    async def mission_create(body: MissionCreateIn) -> dict:
+        try:
+            record = app.state.missions.create(body.model_dump())
+        except MissionError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from None
+        await _broadcast_missions(app, {"type": "mission", "mission": record})
+        return record
+
+    @app.post("/api/missions/{mission_id}/cancel")
+    async def mission_cancel(mission_id: str, body: MissionTransitionIn) -> dict:
+        try:
+            record = app.state.missions.transition(mission_id, {**body.model_dump(), "state": "MISSION_CANCELLED"})
+        except MissionError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from None
+        await _broadcast_missions(app, {"type": "mission", "mission": record})
+        return record
+
+    @app.post("/api/missions/{mission_id}/transition")
+    async def mission_transition(mission_id: str, body: MissionTransitionIn) -> dict:
+        try:
+            record = app.state.missions.transition(mission_id, body.model_dump())
+        except MissionError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from None
+        await _broadcast_missions(app, {"type": "mission", "mission": record})
+        return record
+
+    @app.post("/api/missions/{mission_id}/position")
+    async def mission_position(mission_id: str, body: MissionPositionIn) -> dict:
+        try:
+            record = app.state.missions.position(mission_id, body.model_dump())
+        except MissionError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from None
+        if body.persist:
+            await _broadcast_missions(app, {"type": "mission_position", "mission": record})
+        return record
+
+    @app.get("/api/nodes")
+    def mission_nodes() -> dict:
+        return app.state.missions.nodes()
+
+    @app.get("/api/incidents")
+    def mission_incidents() -> dict:
+        return {"incidents": list(reversed(app.state.missions.incidents)), "simulation_only": True}
+
+    @app.post("/api/incidents")
+    async def mission_incident(body: IncidentRecordIn) -> dict:
+        try:
+            record = app.state.missions.add_incident(body.model_dump())
+        except MissionError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from None
+        await _broadcast_missions(app, {"type": "incident", "incident": record})
+        return record
+
+    @app.websocket("/ws/missions")
+    async def missions_ws(websocket: WebSocket) -> None:
+        await websocket.accept()
+        app.state.missions.listeners.add(websocket)
+        try:
+            await websocket.send_json({"type": "mission_snapshot", "mission": app.state.missions.current()})
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+        finally:
+            app.state.missions.listeners.discard(websocket)
+
     @app.get("/health", response_model=HealthOut)
     def health() -> HealthOut:
         return HealthOut(status="ok", api="running")
@@ -432,6 +649,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def status() -> StatusOut:
         current_hub: Hub = app.state.hub
         latest_reading = current_hub.store.latest
+        current_hub.refresh_gas()
         return StatusOut(
             api="running",
             serial=SerialStatusOut(**current_hub.serial_status()),
@@ -439,7 +657,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             stored_readings=current_hub.store.count(),
             thresholds=ThresholdsOut(**current_hub.alerts.thresholds.as_dict()),
             preliminary_alerts=[AlertOut(**item) for item in current_hub.alerts.payload()],
+            gas_alarm=GasAlarmOut(**current_hub.gas.payload()),
         )
+
+    @app.post("/api/alarms/gas/acknowledge", response_model=GasAlarmOut)
+    async def acknowledge_gas_alarm() -> GasAlarmOut:
+        current_hub: Hub = app.state.hub
+        before = current_hub.gas.signature()
+        payload = current_hub.acknowledge_gas()
+        if current_hub.gas.signature() != before:
+            await current_hub.manager.broadcast(
+                {"type": "gas_alarm", "gas_alarm": payload, "synthetic": False}
+            )
+            log_line(f"[sensor] Gas alarm {payload.get('event_id')} acknowledged.")
+        return GasAlarmOut(**payload)
 
     @app.post("/api/test/inject", response_model=TestInjectOut)
     async def inject_test(body: TestInjectBody, request: Request) -> TestInjectOut:
@@ -471,6 +702,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
+async def _broadcast_missions(app: FastAPI, message: dict) -> None:
+    dead: list[WebSocket] = []
+    for socket in list(app.state.missions.listeners):
+        try:
+            await socket.send_json(message)
+        except Exception:
+            dead.append(socket)
+    for socket in dead:
+        app.state.missions.listeners.discard(socket)
+
+
+async def _watch_gas_alarm(app: FastAPI) -> None:
+    """Mark the alarm stale when packets stop, without opening the serial port."""
+    while True:
+        await asyncio.sleep(5)
+        current_hub: Hub = app.state.hub
+        before = current_hub.gas.signature()
+        payload = current_hub.refresh_gas()
+        if current_hub.gas.signature() == before:
+            continue
+        await current_hub.manager.broadcast(
+            {"type": "gas_alarm", "gas_alarm": payload, "synthetic": False}
+        )
+
+
 async def _maybe_inject_from_socket(hub: Hub, incoming: str) -> None:
     try:
         payload = json.loads(incoming)
@@ -495,17 +751,67 @@ async def _maybe_inject_from_socket(hub: Hub, incoming: str) -> None:
 app = create_app()
 
 
+def sensor_health_payload(body: object) -> bool:
+    return isinstance(body, dict) and body.get("status") == "ok" and body.get("api") == "running"
+
+
+def sensor_port_is_open(host: str, port: int) -> bool:
+    target = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.4)
+        return sock.connect_ex((target, port)) == 0
+
+
+def running_sensor_api_is_healthy(port: int) -> bool:
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/health", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=0.8) as response:
+            if response.status != 200:
+                return False
+            body = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError):
+        return False
+    return sensor_health_payload(body)
+
+
+def refuse_duplicate_backend(host: str, port: int) -> None:
+    if not sensor_port_is_open(host, port):
+        return
+    if running_sensor_api_is_healthy(port):
+        raise SystemExit(
+            f"[sensor] Port {port} is already serving a healthy Wildcraft sensor API. "
+            "This process will not start another one. "
+            "Run start-sensor-backend.ps1 -Restart to stop that backend and start its replacement."
+        )
+    raise SystemExit(
+        f"[sensor] Port {port} is already in use, and it did not answer as a healthy Wildcraft sensor API. "
+        "This process will not start a second copy and will not stop the other program. "
+        "If that listener is an old Wildcraft backend, run start-sensor-backend.ps1 -Restart."
+    )
+
+
 def main() -> None:
     settings: Settings = app.state.settings
+    refuse_duplicate_backend(settings.host, settings.port)
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(logger_name).setLevel(logging.WARNING)
-    uvicorn.run(
-        app,
-        host=settings.host,
-        port=settings.port,
-        log_level="warning",
-        access_log=False,
-    )
+    try:
+        uvicorn.run(
+            app,
+            host=settings.host,
+            port=settings.port,
+            log_level="warning",
+            access_log=False,
+        )
+    except OSError as exc:
+        in_use = exc.errno in {48, 98, 10048} or getattr(exc, "winerror", None) == 10048
+        if not in_use:
+            raise
+        raise SystemExit(
+            f"[sensor] Port {settings.port} became busy while starting. "
+            "This process will not replace whatever is listening. "
+            "Run start-sensor-backend.ps1 -Restart only when that listener is the Wildcraft sensor backend."
+        ) from None
 
 
 if __name__ == "__main__":

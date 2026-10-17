@@ -2,6 +2,8 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { useProgress } from '@react-three/drei';
 import { Component, Suspense, useEffect, useRef, useSyncExternalStore, type PointerEvent, type ReactNode } from 'react';
 
+import { getOpsDocument, subscribeOps } from '../ops/opsStore';
+
 import { AI_DISCLAIMER } from '../../shared/types';
 import { formatPacketTime } from '../services/format';
 import { CAMERA_LABEL, CONTROL_ROWS, releaseInputs } from '../simulator/controls';
@@ -203,6 +205,9 @@ function SimTop() {
   const mission = MISSIONS.find((item) => item.id === sim.missionId) ?? MISSIONS[0];
   const inferenceLabel = inference.phase === 'connected' ? 'Inference live' : 'Inference offline';
   const sensorLabel = sensor.reachedApi ? `Sensors ${sensor.link}` : 'Sensors offline';
+  const geographic = useSyncExternalStore(subscribeOps, getOpsDocument, getOpsDocument);
+  const mapMission = geographic.mission;
+  const mapMissionActive = !!mapMission && mapMission.state !== 'MISSION_COMPLETED' && mapMission.state !== 'MISSION_CANCELLED' && mapMission.state !== 'MISSION_FAILED';
   return (
     <header className="sim-top">
       <div>
@@ -219,6 +224,7 @@ function SimTop() {
       <span className={sensor.reachedApi ? 'sim-chip' : 'sim-chip warn'}>{sensorLabel}</span>
       <span className={inference.phase === 'connected' ? 'sim-chip' : 'sim-chip warn'}>{inferenceLabel}</span>
       {tel.warning ? <span className="sim-chip warn">{tel.warning}</span> : null}
+      {mapMissionActive ? <span className="sim-chip warn">Map mission {mapMission?.state} is a separate geographic simulation. This 3D scene is not that flight.</span> : null}
     </header>
   );
 }

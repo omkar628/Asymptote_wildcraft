@@ -4,6 +4,7 @@ import { AppHeader } from '@/components/AppHeader';
 import { ScreenFrame } from '@/components/ScreenFrame';
 import { useTabBarInset } from '@/components/useTabBarInset';
 import { BackendSettingsCard } from '@/features/live/BackendSettingsCard';
+import { GasAlarmBanner } from '@/features/live/GasAlarmBanner';
 import { LiveConnectionStatus } from '@/features/live/LiveConnectionStatus';
 import { PhoneThresholdCard } from '@/features/live/PhoneThresholdCard';
 import { PreliminaryAlertCard } from '@/features/live/PreliminaryAlertCard';
@@ -77,6 +78,12 @@ export function LiveSensorDashboard() {
           serial={live.serial}
         />
         {settings}
+        <GasAlarmBanner
+          ackError={live.ackError}
+          acknowledging={live.acknowledging}
+          alarm={live.gasAlarm}
+          onAcknowledge={live.acknowledgeAlarm}
+        />
 
         {reading ? (
           <View style={styles.grid}>

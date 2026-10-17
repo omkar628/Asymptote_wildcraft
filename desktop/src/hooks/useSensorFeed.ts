@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import type { LaptopThresholds, PreliminaryAlert, SensorReading, SerialStatus } from '../../shared/types';
+import type { GasAlarm, LaptopThresholds, PreliminaryAlert, SensorReading, SerialStatus } from '../../shared/types';
 import { websocketUrl } from '../../shared/validate';
 import {
   type DashboardLinkState,
@@ -9,6 +9,7 @@ import {
 } from '../services/format';
 import { requestJson } from '../services/http';
 import { acceptPolledLatest, appendReading, replaceWithFetched } from '../services/readings';
+import { parseGasAlarm } from '../services/gasAlarm';
 import {
   SensorApiError,
   parseHistory,
@@ -25,6 +26,9 @@ export type SensorFeed = {
   history: SensorReading[];
   serial: SerialStatus | null;
   preliminaryAlerts: PreliminaryAlert[];
+  gasAlarm: GasAlarm | null;
+  acknowledgeGasAlarm: () => Promise<void>;
+  gasAckError: string | null;
   thresholds: LaptopThresholds | null;
   storedReadings: number | null;
   errorText: string | null;
@@ -43,6 +47,8 @@ export function useSensorFeed(baseUrl: string): SensorFeed {
   const [history, setHistory] = useState<SensorReading[]>([]);
   const [serial, setSerial] = useState<SerialStatus | null>(null);
   const [preliminaryAlerts, setPreliminaryAlerts] = useState<PreliminaryAlert[]>([]);
+  const [gasAlarm, setGasAlarm] = useState<GasAlarm | null>(null);
+  const [gasAckError, setGasAckError] = useState<string | null>(null);
   const [thresholds, setThresholds] = useState<LaptopThresholds | null>(null);
   const [storedReadings, setStoredReadings] = useState<number | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -67,6 +73,8 @@ export function useSensorFeed(baseUrl: string): SensorFeed {
       setHistory([]);
       setSerial(null);
       setPreliminaryAlerts([]);
+      setGasAlarm(null);
+      setGasAckError(null);
       setThresholds(null);
       setStoredReadings(null);
       setReceivedAtMs(null);
@@ -123,6 +131,9 @@ export function useSensorFeed(baseUrl: string): SensorFeed {
         }
         setSerial(status.serial);
         setPreliminaryAlerts(status.preliminaryAlerts);
+        if (status.gasAlarm !== undefined) {
+          setGasAlarm(status.gasAlarm);
+        }
         setThresholds(status.thresholds);
         setStoredReadings(status.storedReadings);
         setReachedApi(true);
@@ -178,9 +189,20 @@ export function useSensorFeed(baseUrl: string): SensorFeed {
         }
         if (message.type === 'status') {
           setSerial(message.serial);
+          if (message.gasAlarm !== undefined) {
+            setGasAlarm(message.gasAlarm);
+          }
+          return;
+        }
+        if (message.type === 'gas_alarm') {
+          setGasAlarm(message.gasAlarm);
+          setReachedApi(true);
           return;
         }
         setPreliminaryAlerts(message.preliminaryAlerts);
+        if (message.gasAlarm !== undefined) {
+          setGasAlarm(message.gasAlarm);
+        }
         if (message.type === 'snapshot') {
           setSerial(message.serial);
         }
@@ -242,11 +264,32 @@ export function useSensorFeed(baseUrl: string): SensorFeed {
           ? 'Connected'
           : 'No data received';
 
+  const acknowledgeGasAlarm = async () => {
+    if (!baseUrl) {
+      setGasAckError('Set the sensor backend URL in Settings.');
+      return;
+    }
+    setGasAckError(null);
+    try {
+      const body = await requestJson(`${baseUrl}/api/alarms/gas/acknowledge`, API_TIMEOUT_MS, { method: 'POST' });
+      const alarm = parseGasAlarm(body);
+      if (!alarm) {
+        throw new SensorApiError('The gas alarm response was not valid.');
+      }
+      setGasAlarm(alarm);
+    } catch (error) {
+      setGasAckError(error instanceof Error ? error.message : 'The alarm could not be acknowledged.');
+    }
+  };
+
   return {
     latest,
     history,
     serial,
     preliminaryAlerts,
+    gasAlarm,
+    acknowledgeGasAlarm,
+    gasAckError,
     thresholds,
     storedReadings,
     errorText,
